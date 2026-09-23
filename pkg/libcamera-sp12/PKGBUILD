@@ -1,9 +1,10 @@
 # libcamera 0.7.2 with IMX681 support for the Surface Pro 12 (Intel) front
 # camera: sensor properties, the gain/black-level helper that simple-IPA AGC
-# needs, and initial tuning data. Derived from Arch's libcamera PKGBUILD
+# needs, initial tuning data, and an AGC exposure/gain threshold (1/60 s) to
+# limit motion blur. Derived from Arch's libcamera PKGBUILD
 # (David Runge, Carl Smedstad); builds only libcamera, libcamera-ipa and
 # libcamera-tools, without docs, Qt, GStreamer or Python bindings.
-# pkgrel 4.1 replaces Arch's 0.7.2-4; any newer Arch release supersedes it.
+# pkgrel 4.x replaces Arch's 0.7.2-4; any newer Arch release supersedes it.
 
 pkgbase=libcamera
 pkgname=(
@@ -12,7 +13,7 @@ pkgname=(
   libcamera-tools
 )
 pkgver=0.7.2
-pkgrel=4.1
+pkgrel=4.2
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 IMX681 support)"
 arch=(x86_64)
 url="https://libcamera.org/"
@@ -41,8 +42,10 @@ source=(
   0001-libcamera-camera_sensor_properties-Add-IMX681.patch
   0002-libipa-camera_sensor_helper-Add-IMX681.patch
   0003-ipa-simple-Add-initial-IMX681-tuning-data.patch
+  0004-ipa-simple-agc-Add-an-exposure-gain-threshold.patch
 )
 sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
+            SKIP
             SKIP
             SKIP
             SKIP)

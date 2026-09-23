@@ -1,0 +1,28 @@
+Subject: media: i2c: imx681: report the video-timing pixel clock
+
+V4L2_CID_PIXEL_RATE was derived from the CSI-2 link (969.6 MHz * 2 * 2
+lanes / 10 bits = 387.84 MHz), but userspace combines it with the line
+length and frame length, which count in video-timing pixel clocks. The VT
+clock is 19.2 MHz * 225 (0x0307) / 6 = 720 MHz: 7552 * 3177 / 720 MHz is a
+33.3 ms frame, matching the measured 29.97 fps. With the link-derived
+value libcamera computed a 61.8 ms maximum exposure at 30 fps.
+
+IPU7 takes the CSI-2 rate from V4L2_CID_LINK_FREQ, which is unchanged.
+---
+--- a/drivers/media/i2c/imx681.c
++++ b/drivers/media/i2c/imx681.c
+@@ -69,7 +69,13 @@
+ #define IMX681_LINK_FREQ		969600000LL
+ 
+ /* Pixel rate = link_freq * 2 (DDR) * num_lanes / bpp */
+-#define IMX681_PIXEL_RATE		(IMX681_LINK_FREQ * 2 * IMX681_NUM_LANES / 10)
++/*
++ * Video-timing pixel clock: 19.2 MHz * 225 (0x0307) / 6 = 720 MHz. This is what
++ * LINE_LENGTH_PCK and FRAME_LENGTH_LINES count in: 7552 * 3177 / 720 MHz is a
++ * 33.3 ms frame, matching the measured 29.97 fps. (The CSI-2 payload rate,
++ * link frequency * 2 * lanes / 10, is a different, lower quantity.)
++ */
++#define IMX681_PIXEL_RATE		720000000LL
+ 
+ /* Power-on delay after reset deassert */
+ #define IMX681_RESET_DELAY_US		10000

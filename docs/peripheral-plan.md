@@ -25,7 +25,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 |---|---|---|---|---|
 | 1 | Power / volume buttons | `MSHW0040` `\_SB.MSBT` | **Fixed** (`0005` probe order). Volume order matches Windows (left = up), shipped as stock | `soc_button_array` (=m) |
 | 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
-| 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0013`, libcamera 0.7.2-4.1); motion dashes in full-res mode → add the binned mode Windows uses | new `imx681` |
+| 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0015`, libcamera 0.7.2-4.2). Open: motion false-colour dashes (soft-ISP side), colour tuning | new `imx681` |
 | 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | unbound | `vd55g1` (=m) is the sibling part |
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Powers up and polls (`0006`); a credit card isn't detected** | RF config next |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
@@ -239,11 +239,28 @@ no source nodes, so no WirePlumber policy is needed). Both stream at 30 fps.
     fits the SP11 runtime-traces-only provenance rule), or the mode tables in
     `imx681.sys` (data only; private cross-check). The Windows extension also ships
     `graph_settings_imx681_MSHW0740_PTL.bin` (IPU mode list).
-  - **Exposure pinned at maximum** (simple-IPA AGC maxes exposure before gain), which
-    means motion blur. Cap exposure / prefer gain (tuning or a control limit).
-  - **Pixel rate likely reported at half:** metadata says 61.8 ms exposure at a
-    measured 30 fps (33 ms frames). Check the driver's `V4L2_CID_PIXEL_RATE`
-    against `LINE_LENGTH_PCK` 7552 × frame length 3177 × 30 fps ≈ 720 MHz.
+  - ~~Exposure pinned at maximum~~ **fixed:** libcamera patch `0004` adds an
+    `exposureGainThreshold` to the simple AGC (exposure up to it, then gain, then
+    exposure to the limit; rebalances power-on exposure into gain).
+    `imx681.yaml` sets 1/60 s. Verified: 16.7 ms instead of 33 ms, gain takes over.
+    It trades blur for noise in dim rooms; tune the threshold by eye
+    (`/usr/share/libcamera/ipa/simple/imx681.yaml`). libcamera 0.7.2-4.2.
+  - ~~Pixel rate reported at half~~ **fixed (`0015`):** it was derived from the CSI
+    link (387.84 MHz); the VT clock is 19.2 MHz × 225 / 6 = 720 MHz (7552 × 3177 ×
+    29.97 fps = 719 MHz). Exposure metadata now tops out at 33.3 ms. IPU7 uses
+    `LINK_FREQ`, which is unchanged. DKMS 1.6.
+  - **Windows' `imx681.sys` mode tables** (read from the binary, 8-byte entries
+    `{u16 addr, u16 0, u32 val}` around offset 0x25534): two modes, both full-res
+    3844×2640 with the same crop and vendor registers, and **no binning** and no
+    `0x0101`. A: line 0x1D60, frame 0x0C77, PLL2 0x134 (30 fps). B: line 0x1D80,
+    frame 0x18D2, PLL2 0x12F (15 fps). Ours is B's clock at a 30 fps frame
+    length, which is valid. So **Windows scales in its ISP rather than binning**,
+    and Linux's tighter framing is the CPU soft ISP centre-cropping instead of
+    scaling. The motion dashes are then most likely cleaned up by Windows' ISP
+    (false-colour suppression / temporal NR), which libcamera's soft ISP lacks:
+    **Phase 6, ISP-side**, not a driver bug. The dash rate varies 0–52 per 80
+    frames with motion speed, so A/B tests need many runs
+    (`private/camera/tools/motion-test.sh`).
   - Green/grey cast under warm light: no CCM or tuned AWB yet (Phase 6).
   - The GPU and CPU ISPs pick different fields of view at 1920×1440.
 
