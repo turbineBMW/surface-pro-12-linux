@@ -58,6 +58,10 @@ SP12_ISH_FW=/path/to/IshS_SI.bin iso/build-sp12-iso.sh   # private ISO (includes
 iso/build-sp12-iso.sh                                     # shareable ISO
 ```
 
+`iso/test-vm-install.sh <iso> <mu-fv-dir>` installs the ISO unattended in QEMU
+and boots the result under Project Mu with the Surface-like NX policy
+(`limine/qemu/build-q35.sh`), then checks the loader, DKMS modules and packages.
+
 The live ISO boots `linux-t2` without these modules, so use a USB keyboard in
 the installer; the Flex Keyboard works from the first boot of the installed system.
 
