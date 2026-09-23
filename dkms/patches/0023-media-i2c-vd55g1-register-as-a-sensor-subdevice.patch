@@ -1,0 +1,19 @@
+Subject: media: i2c: vd55g1: register as a sensor subdevice
+
+Use v4l2_async_register_subdev_sensor() so the V4L2 core looks up the
+sensor's privacy LED (and other sensor fwnode properties) and turns it on
+while streaming. On the Surface Pro 12 (Intel) the IR camera's INT3472
+provides a "privacy" LED next to the camera cluster that otherwise stayed
+off while the IR camera streamed.
+---
+--- a/drivers/media/i2c/vd55g1.c
++++ b/drivers/media/i2c/vd55g1.c
+@@ -2378,7 +2378,7 @@ static int vd55g1_probe(struct i2c_client *client)
+ 		goto err_power_off;
+ 	}
+ 
+-	ret = v4l2_async_register_subdev(&sensor->sd);
++	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
+ 	if (ret) {
+ 		dev_err(dev, "async subdev register failed %d\n", ret);
+ 		goto err_subdev;

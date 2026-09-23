@@ -302,8 +302,11 @@ Then Howdy from SP11's config.
   already accepted Y10; Y8 added). `0022` vd55g1: RAW8 output on the VD55G0
   (`FORMAT_CTRL`/`OIF_IMG_CTRL` after the table); the firmware accepts it.
 - **Emitter:** strobes **alternate frames** (lit ~83/255, ambient ~22 in a dark
-  room), Windows Hello-style. INT3472 "privacy LED" `SMO55F0_00::privacy_led`
-  raises lit frames to ~121 but is not the emitter.
+  room), Windows Hello-style; a faint red glow on the **left** of the camera cluster.
+  The INT3472 "privacy LED" (`SMO55F0_00::privacy_led`) is the visible indicator on
+  the **right**. `0023`: vd55g1 now registers with
+  `v4l2_async_register_subdev_sensor()`, so the core drives that LED while the IR
+  camera streams (verified: 0 → 1 → 0, both lights seen).
 - Boot wiring: `sp12-ir-camera.service` + `70-sp12-ir-camera.rules` link CSI2 1 →
   ISYS Capture 8 and set Y8 644×604 (`/dev/sp12-ir` symlink). libcamera use of the
   other cameras leaves the link alone.
