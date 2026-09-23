@@ -1,0 +1,39 @@
+#!/usr/bin/ash
+
+# Test-only. Save the tail of the kernel log to NVRAM (LimineDmesg0..3 under
+# Limine's vendor GUID), then panic so the machine reboots on its own.
+crashdump_now() {
+    echo "crashdump: $1, saving dmesg to NVRAM" > /dev/kmsg
+    v=/sys/firmware/efi/efivars
+    guid=513ee0d0-6e43-cb05-b272-f146a2fcb88a
+    mountpoint -q "$v" || mount -t efivarfs efivarfs "$v"
+    dmesg > /run/dmesg.txt
+    tail -c 28672 /run/dmesg.txt > /run/dmesg.tail
+    # efivarfs takes attributes and data in one write(), hence the staging
+    # file and a block size larger than the record.
+    for i in 0 1 2 3; do
+        { printf '\007\000\000\000'; dd if=/run/dmesg.tail bs=7168 skip=$i count=1; } > /run/rec 2>/dev/null
+        dd if=/run/rec of="$v/LimineDmesg$i-$guid" bs=16384 2>/dev/kmsg
+    done
+    sync
+    echo 1 > /proc/sys/kernel/sysrq
+    echo c > /proc/sysrq-trigger
+}
+
+run_earlyhook() {
+    echo "crashdump: armed (60s)" > /dev/kmsg
+    (sleep 60; crashdump_now "root not reached after 60s") &
+    echo $! > /run/crashdump.pid
+}
+
+run_cleanuphook() {
+    # Cleanup hooks also run when the root mount failed; only disarm on success.
+    if [ "$(stat -c %D /)" != "$(stat -c %D /sysroot)" ]; then
+        kill "$(cat /run/crashdump.pid)" 2>/dev/null
+        echo "crashdump: root mounted, disarmed" > /dev/kmsg
+    fi
+}
+
+run_emergencyhook() {
+    crashdump_now "emergency shell reached"
+}

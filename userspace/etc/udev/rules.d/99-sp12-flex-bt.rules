@@ -1,0 +1,4 @@
+# When the Flex Keyboard's wired KIP HID endpoint goes away (detach), ask BlueZ
+# to connect it over Bluetooth.
+ACTION=="remove", SUBSYSTEM=="hid", ENV{HID_NAME}=="*045E:0C8B*", \
+  RUN+="/usr/bin/systemctl --no-block start sp12-flex-bt-connect.service"

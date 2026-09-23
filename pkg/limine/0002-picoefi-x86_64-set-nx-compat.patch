@@ -1,0 +1,13 @@
+diff --git a/x86_64/entry.S b/x86_64/entry.S
+index b019131..788741f 100644
+--- a/x86_64/entry.S
++++ b/x86_64/entry.S
+@@ -86,7 +86,7 @@
+     .long __text_start - fbase // headers size
+     .long 0            // checksum
+     .short 0x0a        // subsystem
+-    .short 0           // dll characteristics
++    .short 0x0100      // dll characteristics (NX_COMPAT)
+     .quad 0            // stack reserve size
+     .quad 0            // stack commit size
+     .quad 0            // heap reserve size

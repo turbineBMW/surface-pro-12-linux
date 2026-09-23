@@ -1,0 +1,47 @@
+# Arch's limine PKGBUILD (Robin Candau <antiz@archlinux.org>) plus two fixes
+# needed to boot on the Surface Pro 12 (Intel), whose firmware refuses EFI
+# images without NX_COMPAT and traps writes to memory it still owns:
+#   0001  Limine: do not zero the 64MiB left to the firmware in init_memmap()
+#   0002  PicoEFI: set IMAGE_DLLCHARACTERISTICS_NX_COMPAT on the x86_64 image
+# epoch=1 keeps a stock Arch limine update from replacing this build (the stock
+# one does not boot on that hardware). Drop it once upstream carries the fixes.
+
+pkgname=limine
+_pkgname=Limine
+pkgver=12.9.0
+pkgrel=1
+epoch=1
+pkgdesc="An advanced, portable, multiprotocol bootloader (Surface Pro 12 fixes)"
+url="https://github.com/Limine-Bootloader/Limine"
+arch=('x86_64')
+license=('BSD-2-Clause')
+depends=('glibc')
+makedepends=('git' 'nasm' 'mtools' 'llvm' 'lld' 'clang')
+install="${pkgname}.install"
+source=("git+${url}.git#tag=v${pkgver}?signed"
+        0001-mm-pmm-do-not-zero-memory-left-to-the-firmware.patch
+        0002-picoefi-x86_64-set-nx-compat.patch)
+sha256sums=('392c24800b2aa7c174bb498c2bf3ca00e624609a5f8251bf1bc73df80a9a8a79'
+            'SKIP'
+            'SKIP')
+validpgpkeys=('05D29860D0A0668AAEFB9D691F3C021BECA23821'  # Mintsuki <mintsuki@protonmail.com>
+              '6C222EA6B2BD216AA406516AC868F0B6DE38409D') # Kamila Szewczyk <k@iczelia.net>
+
+prepare() {
+	cd "${_pkgname}"
+	./bootstrap
+	patch -p1 < "${srcdir}/0001-mm-pmm-do-not-zero-memory-left-to-the-firmware.patch"
+	patch -d picoefi -p1 < "${srcdir}/0002-picoefi-x86_64-set-nx-compat.patch"
+}
+
+build() {
+	cd "${_pkgname}"
+	./configure --prefix=/usr --enable-all
+	make
+}
+
+package() {
+	cd "${_pkgname}"
+  	make DESTDIR="${pkgdir}" install
+	install -Dm 644 COPYING "${pkgdir}/usr/share/licenses/${pkgname}/COPYING"
+}

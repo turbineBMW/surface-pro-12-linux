@@ -1,0 +1,15 @@
+#!/bin/bash
+# Test-only: panic into EFI pstore if the initramfs never hands over to root.
+
+build() {
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Arms a 60s timer in the initramfs. If the real root has not been mounted by
+the cleanup stage, or the boot falls into the emergency shell, it forces a
+kernel panic so the tail of the kernel log is saved to EFI pstore (use with
+efi_pstore.pstore_disable=0 panic=10 on the kernel command line).
+HELPEOF
+}

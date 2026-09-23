@@ -1,0 +1,22 @@
+# PRIVATE: Microsoft's Surface ISH (sensor hub) firmware for the Surface Pro 12
+# (Intel), from Microsoft's driver MSI. Not redistributable; never publish a
+# package or ISO containing it. SP12_ISH_FW points at the extracted IshS_SI.bin.
+
+pkgname=sp12-ish-firmware
+pkgver=5.8.1.7779
+pkgrel=1
+pkgdesc="Surface Pro 12 (Intel) ISH sensor hub firmware (private, from Microsoft's driver MSI)"
+arch=('any')
+license=('LicenseRef-Microsoft-proprietary')
+options=('!strip' '!debug')
+
+# The ISH loader's most specific name: CRC32 of sys_vendor, product_family,
+# product_name and product_sku of this model (drivers/hid/intel-ish-hid/ishtp/loader.c).
+_fwname=ish_ptl_e4c77c1d_73fca7f2_8d4bd421_7cace0d8.bin
+_sha256=921e34f81d48a21506b8ce2bf9bab118b16722dd0f6852814b221093872a8ea1
+
+package() {
+	local src="${SP12_ISH_FW:?set SP12_ISH_FW to the extracted IshS_SI.bin}"
+	echo "${_sha256}  ${src}" | sha256sum -c -
+	install -Dm644 "$src" "${pkgdir}/usr/lib/firmware/updates/intel/ish/${_fwname}"
+}

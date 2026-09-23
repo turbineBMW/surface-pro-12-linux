@@ -1,0 +1,13 @@
+diff --git a/Platforms/QemuQ35Pkg/PlatformPei/Platform.c b/Platforms/QemuQ35Pkg/PlatformPei/Platform.c
+index 84b8678..466e337 100644
+--- a/Platforms/QemuQ35Pkg/PlatformPei/Platform.c
++++ b/Platforms/QemuQ35Pkg/PlatformPei/Platform.c
+@@ -808,7 +808,7 @@ InitializePlatform (
+     DxeSettings.ImageProtectionPolicy.Fields.ProtectImageFromUnknown = 1;
+     // THE /NXCOMPAT DLL flag is not set on grub/shim today, so do not block loading
+     // otherwise we cannot boot Linux
+-    DxeSettings.ImageProtectionPolicy.Fields.BlockImagesWithoutNxFlag = 0;
++    DxeSettings.ImageProtectionPolicy.Fields.BlockImagesWithoutNxFlag = 1;
+ 
+     BuildGuidDataHob (
+       &gDxeMemoryProtectionSettingsGuid,

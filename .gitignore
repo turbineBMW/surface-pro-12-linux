@@ -1,0 +1,26 @@
+# Bluetooth HCI captures contain pairing keys.
+captures/
+*.snoop
+
+# Microsoft firmware and anything else that must not be published.
+private/
+*.bin
+
+# Build outputs and external checkouts.
+pkg/*/src/
+pkg/*/pkg/
+pkg/limine/Limine/
+pkg/limine-arch/
+pkg/out/
+*.pkg.tar.*
+*.iso
+*.efi
+
+# First hand-built module attempt, superseded by dkms/.
+ssam-modules/
+
+# QEMU / Project Mu reproduction working files.
+limine/qemu/mu_tiano_platforms/
+limine/qemu/out/
+limine/qemu/esp/
+limine/qemu/*.log
