@@ -4,13 +4,13 @@
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.3
+pkgver=1.4
 pkgrel=1
-pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default"
+pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, IR camera wiring"
 arch=('any')
 license=('MIT')
 options=('!debug')
-depends=('python' 'bluez' 'bluez-utils' 'sp12-modules-dkms')
+depends=('python' 'bluez' 'bluez-utils' 'v4l-utils' 'sp12-modules-dkms')
 optdepends=('libcamera: cameras' 'pipewire-libcamera: cameras in PipeWire apps and browsers')
 
 package() {
@@ -22,6 +22,11 @@ package() {
 		"${pkgdir}/usr/lib/udev/rules.d/99-sp12-flex-bt.rules"
 	install -Dm644 "$u/usr/lib/environment.d/60-sp12-libcamera.conf" \
 		"${pkgdir}/usr/lib/environment.d/60-sp12-libcamera.conf"
+	install -Dm755 "$u/usr/lib/sp12/sp12-ir-graph" "${pkgdir}/usr/lib/sp12/sp12-ir-graph"
+	install -Dm644 "$u/usr/lib/systemd/system/sp12-ir-camera.service" \
+		"${pkgdir}/usr/lib/systemd/system/sp12-ir-camera.service"
+	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-ir-camera.rules" \
+		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-ir-camera.rules"
 	sed 's|/usr/local/libexec/sp12-flex-bt-autoconnect|/usr/lib/sp12/sp12-flex-bt-autoconnect|' \
 		"$u/etc/systemd/system/sp12-flex-bt-connect.service" \
 		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-bt-connect.service"

@@ -26,7 +26,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 1 | Power / volume buttons | `MSHW0040` `\_SB.MSBT` | **Fixed** (`0005` probe order). Volume order matches Windows (left = up), shipped as stock | `soc_button_array` (=m) |
 | 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
 | 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0016`, libcamera 0.7.2-4.2). Open: colour tuning, noise (soft ISP has no NR) | new `imx681` |
-| 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | unbound | `vd55g1` (=m) is the sibling part |
+| 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | **Works** (`0017`–`0022`): GREY 644×604 on `/dev/video8`, emitter strobes alternate frames; irlume next | `vd55g1` + VD55G0 |
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Powers up and polls (`0006`); a credit card isn't detected** | RF config next |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
@@ -289,6 +289,31 @@ exposure/gain bank), ACPI power via `ICL1`, an `ipu-bridge` SMO55F0 entry, then 
 the emitter pin (sensor-GPIO strobe; try each pin, compare IR frame brightness).
 Then Howdy from SP11's config.
 
+### Phase 2b results (2026-09-23): IR camera
+- `0017` vd55g1: the Surface Pro 11 VD55G0 support, ported to 7.2 (model ID, FSM at
+  0x002c, 552-byte firmware patch, fixed 644×604 mode, exposure bank at 0x044x).
+- `0018` vd55g1: ACPI `SMO55F0`, INT3472 supplies (`avdd`/`dovdd`), defer until the
+  bridge endpoint exists, and the **SP12** Windows 19.2 MHz mode table.
+  `vd55g0.sys` holds three firmware patches (the 552-byte one is identical to
+  SP11's) and three mode tables (24/12/19.2 MHz EXT_CLOCK). SP12's table sets
+  **GPIO0/GPIO1 (0x0469/0x046a) = strobe**, which drives the emitter.
+- `0019` ipu-bridge: `SMO55F0`, one lane, 420 MHz (840 Mbps).
+- `0020`/`0021` IPU7 ISYS: `Y10`/`Y10P` and `GREY` capture (the CSI2 receiver
+  already accepted Y10; Y8 added). `0022` vd55g1: RAW8 output on the VD55G0
+  (`FORMAT_CTRL`/`OIF_IMG_CTRL` after the table); the firmware accepts it.
+- **Emitter:** strobes **alternate frames** (lit ~83/255, ambient ~22 in a dark
+  room), Windows Hello-style. INT3472 "privacy LED" `SMO55F0_00::privacy_led`
+  raises lit frames to ~121 but is not the emitter.
+- Boot wiring: `sp12-ir-camera.service` + `70-sp12-ir-camera.rules` link CSI2 1 →
+  ISYS Capture 8 and set Y8 644×604 (`/dev/sp12-ir` symlink). libcamera use of the
+  other cameras leaves the link alone.
+- Testing note: `ipu-bridge` builds its graph once at IPU7 probe and skips it if a
+  graph exists, so a new bridge entry needs a reboot, not a module reload.
+- **irlume:** it refuses `v4l2loopback` by design (physical-bus pinning), so there's no
+  bridge; the ISYS node is on PCI and passes. It needs 8-bit GREY (done). No
+  physical RGB node, so **IR-only** (`irlume auth sensor ir-only --yes`,
+  experimental) until Phase 7's hardware ISP provides one.
+
 ### Phase 3: one Windows session
 SSAM ETW trace (optional now that the storm is fixed), `powercfg /sleepstudy`, the
 speaker loudness reference, which rocker button Windows treats as volume up, and a
@@ -312,6 +337,15 @@ until it's proven). Then decide whether it belongs in `nxp-nci`.
 - Camera tuning (AWB/CCM/LSC) with the libcamera simple-IPA; Windows `.aiqb` files
   are the reference.
 - Optional: MS thermal devices (`MSHW0800` TSxx) if they expose useful temperatures.
+
+### Phase 7: hardware ISP (IPU7 PSYS)
+Windows' image quality comes from IPU7's hardware ISP (PSYS): denoise, CCM, AWB and
+lens shading, tuned by the `.aiqb` files we already have from Windows
+(`private/windows/drivers/imx681_extension…`, `ov13858_extension…`). Linux
+currently uses only ISYS plus libcamera's software ISP, which has no noise reduction
+or colour matrix. Research Intel's out-of-tree IPU7 PSYS driver and camera HAL
+(closed components) on Arch: what exists, how it coexists with PipeWire/libcamera,
+and whether our DKMS/package approach can carry it.
 
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has

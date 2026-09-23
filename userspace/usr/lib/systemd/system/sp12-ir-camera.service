@@ -1,0 +1,8 @@
+[Unit]
+Description=Surface Pro 12 IR camera media graph (GREY 644x604)
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/sp12/sp12-ir-graph
