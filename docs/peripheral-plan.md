@@ -17,15 +17,15 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | Wi-Fi / BT | CNVi `iwlwifi` / `btintel_pcie` | |
 | Keyboard, touchpad, battery, AC, fan, profiles, POS, lid wake, Flex BT | SSAM, `dkms/` | |
 | Backlight | `intel_backlight` | |
-| IPU7 | `intel-ipu7`, `ipu7ptl_fw.bin` authenticates | no sensors attached, see below |
+| IPU7 | `intel-ipu7`, `ipu7ptl_fw.bin` authenticates | rear + front sensors attached (Phase 2a) |
 
 ### Not working or unverified
 
 | # | Device | ACPI | Symptom | Driver in kernel? |
 |---|---|---|---|---|
-| 1 | Power / volume buttons | `MSHW0040` `\_SB.MSBT` | **Fixed** (`0005` probe order); volume rocker reversed → hwdb swap | `soc_button_array` (=m) |
-| 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | `failed to find sensor: -5` (not powered) | `ov13858` (=m), needs a power patch |
-| 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | unbound | **no** |
+| 1 | Power / volume buttons | `MSHW0040` `\_SB.MSBT` | **Fixed** (`0005` probe order). Volume order matches Windows (left = up), shipped as stock | `soc_button_array` (=m) |
+| 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
+| 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0013`, libcamera 0.7.2-4.1); motion dashes in full-res mode → add the binned mode Windows uses | new `imx681` |
 | 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | unbound | `vd55g1` (=m) is the sibling part |
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Powers up and polls (`0006`); a credit card isn't detected** | RF config next |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
@@ -172,69 +172,128 @@ SSAM CPU 0. Lid close → `PM: suspend entry (s2idle)`, and
 `low_power_idle_system_residency_us` = 19.6 s, so **S0ix is reached**. Tablet switch
 reads `laptop` after resume. The volume rocker came out reversed (left = up):
 swapped by `userspace/etc/udev/hwdb.d/61-sp12-volume-keys.hwdb` (verified with
-EVIOCGKEYCODE). Still to check in Windows whether that's SP12 wiring (then it
-belongs in `soc_button_array` upstream) or preference.
+EVIOCGKEYCODE). **Windows uses the stock order** (checked 2026-09-23), so this is a
+preference, not a bug. The swap is no longer shipped (`sp12-flex-tools` 1.3); a
+personal copy lives in `private/local/`.
+
+## Phase 2a results (2026-09-23)
+
+`sp12-modules-dkms` 1.3 and `sp12-flex-tools` 1.2 are installed. **Both visible cameras
+work from boot**: libcamera lists "Internal back camera" and "Internal front camera",
+and PipeWire exposes "Built-in Back/Front Camera" (the 32 raw IPU7 V4L2 devices have
+no source nodes, so no WirePlumber policy is needed). Both stream at 30 fps.
+
+- `0009` ov13858: take optional `reset` and `avdd` from the INT3472 (ICL0) and power
+  the sensor for probe and runtime PM. zR-JB's attachment was malformed (includes
+  pasted inside the struct) and made both resources mandatory; ours keeps the
+  Surface Pro 9 path working.
+- `0010` imx681: zR-JB's RFC (linux-surface/kernel#176), from Andre Gilerson's SP11
+  Intel driver.
+- `0011` ipu-bridge: `OVTID858` (mainline has none; 2 frequencies, 540/270 MHz, per
+  the driver), `SONY0681`, and the rear 180° DMI quirk (#174/#175/#176).
+- `0012` imx681: `-EPROBE_DEFER` without an endpoint. It failed with `-ENXIO` when
+  it probed before IPU7 built the bridge graph, as ov2740 used to.
+- **GPU SoftISP artifact (libcamera 0.7.2):** the front camera shows a 1-px grid and a
+  magenta cast at some output sizes: 1920×1080 bad (score 1.36), and 640×360 has
+  the cast. 640×480, 1280×720, 1920×1440, 2560×1440 and 3840×2160 are clean. It's a
+  one-pass Bayer-downscale aliasing bug (zR-JB, #2144); upstream's multi-pass GPU
+  ISP series should fix it. **Workaround:** `LIBCAMERA_SOFTISP_MODE=cpu` via
+  `/usr/lib/environment.d/60-sp12-libcamera.conf`. It's clean at 1080p (score 0.82)
+  for ~5% more of one core. Scorer: `private/camera/tools/gridscore.py`.
+- `0013` imx681: **no mirror.** The driver copied Windows' `0x0101 = 0x01` (H-mirror,
+  GRBG), so frames were reversed (shirt text backwards). Now orientation is 0 with
+  native RGGB. Raw check: the matching (green) sites are (0,1)/(1,0) (604/590 vs
+  280/295), and a warm lamp stays warm after demosaicing. Installed in DKMS 1.4.
+- `0014` imx681: after a warm reboot from Windows the sensor read chip ID 0x0000
+  1–2 ms after reset release, so probe failed (-EIO) with no retry and the front
+  camera was missing. Now it waits 10 ms and retries the ID read 4× at 5 ms.
+  (Recovering without a reboot: `modprobe -r imx681; modprobe imx681`, then
+  `systemctl --user restart wireplumber`, because WirePlumber only enumerates
+  libcamera cameras at startup.) DKMS 1.5.
+- **Framing:** the driver's single mode reads a 3844×2640 centre window (X from 100,
+  Y from 256), and a 16:9 request crops it further, so Linux is tighter than
+  Windows, which bins the full array and crops digitally (Studio Effects subject
+  following). The crop causes none of the open issues. A binned full-array mode
+  is the prerequisite for any future framing work.
+- **libcamera 0.7.2-4.1** (`pkg/libcamera-sp12`): the SP11 IMX681 series rebased onto
+  0.7.2 (sensor properties, reciprocal gain helper `1024/(1024-code)` plus black
+  level 64@10 bit, initial `imx681.yaml`). zR-JB measured the same gain law on SP12.
+  AGC now reports 9.85× where stock reported "919×" (the raw code). Builds only
+  libcamera, -ipa and -tools; any newer Arch release supersedes it.
+- **Still open:**
+  - **Motion dashes:** 1–3-row orange/blue dashes along moving edges only. They're
+    in `cam` output too (not PipeWire) and with both CPU and GPU ISPs (13 and 53 per
+    81 motion frames at 1920×1440), scattered at many rows (not one tear seam). So
+    they're in the raw data: likely a readout mode where adjacent rows/sites aren't
+    exposed at the same instant (Windows-derived vendor registers). **Next: wave at
+    the Windows Camera app.** No dashes there means compare against a Windows I²C
+    trace; dashes there too means it's inherent and gets handled in demosaic
+    tuning. Detector: `private/camera/tools/dashscore.py`.
+    **Windows result (2026-09-23): no dashes.** Windows streams a **2×2-binned**
+    mode (the ultrawide full FOV, cropped digitally for Windows Studio Effects'
+    subject following). Our driver only has the full-res 3844×2640 mode. If the
+    IMX681 is quad-Bayer, full-res depends on on-chip remosaic, which fringes where
+    the four same-colour pixels of a cell disagree (motion). Binned readout averages
+    the cell into a clean native Bayer (~1922×1320) with better SNR. **Next:** add a
+    binned mode. Register source: a Windows I²C trace of stream start (preferred,
+    fits the SP11 runtime-traces-only provenance rule), or the mode tables in
+    `imx681.sys` (data only; private cross-check). The Windows extension also ships
+    `graph_settings_imx681_MSHW0740_PTL.bin` (IPU mode list).
+  - **Exposure pinned at maximum** (simple-IPA AGC maxes exposure before gain), which
+    means motion blur. Cap exposure / prefer gain (tuning or a control limit).
+  - **Pixel rate likely reported at half:** metadata says 61.8 ms exposure at a
+    measured 30 fps (33 ms frames). Check the driver's `V4L2_CID_PIXEL_RATE`
+    against `LINE_LENGTH_PCK` 7552 × frame length 3177 × 30 fps ≈ 720 MHz.
+  - Green/grey cast under warm light: no CCM or tuned AWB yet (Phase 6).
+  - The GPU and CPU ISPs pick different fields of view at 1920×1440.
 
 ## Order of work
 
-### Phase 0: capture evidence (about 1 hour, no code)
-- Dump ACPI (DSDT + all SSDTs, especially `SsdtNfc` and `IpuSsdt`) into a private
-  `acpi/` directory in the repo.
-- Mount the Windows partition read-only and grep the INFs for the unknown IDs. Save
-  `pnputil`-equivalent notes.
-- Suspend test: `systemctl suspend` for 10 minutes, then read
-  `/sys/devices/system/cpu/cpuidle/low_power_idle_system_residency_us` (currently 0; no
-  suspend has happened this boot yet). With root, also check
-  `/sys/kernel/debug/pmc_core/substate_requirements`.
+Phases 0 and 1 are done (see the findings above; committed in `a22260f`).
 
-### Phase 1: port known-good patches into `dkms/` (low risk, quick)
-- `soc_button_array` deferred-probe fix (from #2144). It's `=m`, so it fits DKMS.
-- SP11 `tablet-mode-resume-resync` and `surface-hid-shutdown`, rebased onto our
-  `surface_aggregator_tabletsw` patch.
-- Instrument `ssam_ll` on the `rqid 0` path to log TC/TID/IID/CID and the payload. Run
-  for a day with a dock/undock/suspend cycle. That tells us whether item 7 is an event
-  that should be registered or a real request that needs an answer.
+### Phase 2: cameras (now)
+**2a, visible cameras (patches exist upstream):**
+- Rear: `ov13858` power/runtime-PM patch, `ipu-bridge` OVTID858 link-frequency entry,
+  and the 180° DMI rotation quirk.
+- Front: the `imx681` driver (kernel#164 lineage, D-PHY) and the `ipu-bridge`
+  SONY0681 entry.
+- All targets are `=m` (`ov13858`, `ipu-bridge`, new `imx681`), so they fit DKMS.
+- Userspace: `libcamera` ≥ 0.7.2 plus the IMX681 helper (reconcile the SP11 libcamera
+  patches with zR-JB's helper), and PipeWire's libcamera SPA. Add it to the ISO.
+- Check first whether zR-JB's series has landed in `linux-surface/kernel`.
 
-### Phase 2: visible cameras (biggest user-visible win; patches exist)
-- Rear: `ov13858` power/runtime-PM patch, `ipu-bridge` OVTID858 link-frequency entry, and
-  the 180° DMI rotation quirk.
-- Front: the `imx681` driver (kernel#164 lineage, D-PHY) and the `ipu-bridge` SONY0681
-  entry.
-- All targets are `=m` (`ov13858`, `ipu-bridge`, new `imx681`), so they can go in
-  `sp12-modules-dkms` or a sibling `sp12-camera-dkms`.
-- Userspace: `libcamera` ≥ 0.7.2 plus the IMX681 helper (reconcile your SP11 libcamera
-  patches with zR-JB's helper), and PipeWire's libcamera SPA. Package as
-  `sp12-camera-tools` or a patched `libcamera` PKGBUILD. Add it to the ISO.
-- Before carrying our own copy, check whether zR-JB's series has landed in
-  `linux-surface/kernel`.
+**2b, IR camera (driver work):** extend `vd55g1` for the VD55G0 (SP11 patch 0017 has the
+exposure/gain bank), ACPI power via `ICL1`, an `ipu-bridge` SMO55F0 entry, then find
+the emitter pin (sensor-GPIO strobe; try each pin, compare IR frame brightness).
+Then Howdy from SP11's config.
 
-### Phase 3: identification (DSDT + offline Windows, then one Windows boot)
-- MSHW0380 "FINK": identify it from the DSDT and the Windows driver name, then decide
-  whether it's worth pursuing.
-- NFC: confirm the chip (PN7160 works with `nxp-nci`; PN7220 is a different beast) and
-  the GPIOs.
-- IR: find the illuminator control path (INT3472 GPIO? an I²C LED driver? SSAM?).
-- Then do the single live Windows session: SSAM ETW trace, sleepstudy, speaker
-  reference, and pen trace if needed.
+### Phase 3: one Windows session
+SSAM ETW trace (optional now that the storm is fixed), `powercfg /sleepstudy`, the
+speaker loudness reference, which rocker button Windows treats as volume up, and a
+pen trace if needed.
 
 ### Phase 4: suspend quality
-- Measure S0ix residency and find blocking IPs with `pmc_core`. Fix keyboard wake,
-  which is probably SSAM/KIP wake events plus what Phase 1 found about `rqid 0`.
-- Validate the resume paths: the touchpad finger-count offset seen on SP11, tablet-mode
-  resync, and camera runtime-PM.
+Longer suspends, keyboard wake, `pmc_core` substate blockers, and the resume paths
+(touchpad finger-count offset seen on SP11, tablet-mode resync, camera runtime-PM).
 
-### Phase 5: driver writing
-- **IR camera:** extend `vd55g1` for the VD55G0 (reuse SP11 patch 0017), add ACPI power
-  via INT3472, an `ipu-bridge` SMO55F0 entry, and the illuminator control. Then set up
-  Howdy from SP11's config.
-- **NFC:** add the `1FC93002` ACPI ID to `nxp-nci_i2c` and map its GPIOs. Test with
-  `neard`/`nfctool`.
-- **MSHW0380:** depends on what Phase 3 finds.
+### Phase 5: NFC RF
+The PN560 powers up and polls but doesn't detect a credit card. Decode Windows'
+`CustomEEPROMConfigBlob` (NXP proprietary set-config tags, starting `A0 11 …`) and
+send it after `CORE_INIT` from a userspace tool, RAM only first (no EEPROM write
+until it's proven). Then decide whether it belongs in `nxp-nci`.
 
 ### Phase 6: polish
 - Speaker tuning: UCM gain ceiling first (the SP11 method), then an EQ derived from the
   Windows APO settings or the reference recording (PipeWire filter-chain). Look at the
   `rt1320 R0 Calibration` controls.
 - Slim Pen tail button: port `sp11-pen-pair`.
-- Camera tuning (AWB/CCM/LSC) with the libcamera simple-IPA.
+- Camera tuning (AWB/CCM/LSC) with the libcamera simple-IPA; Windows `.aiqb` files
+  are the reference.
 - Optional: MS thermal devices (`MSHW0800` TSxx) if they expose useful temperatures.
+
+### Post-work: upstream reports (once everything is up)
+- **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
+  ~13% CPU from boot. Include the payload layout `{source, old, new}`, the
+  sources-list replay trigger, and the before/after numbers.
+- `0006` PN560 GPIO roles (with a working tag read), `0005` (zR-JB's, confirm
+  it's merged), and the volume rocker once Windows' behaviour is known.

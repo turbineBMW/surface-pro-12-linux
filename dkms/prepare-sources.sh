@@ -40,7 +40,7 @@ arch)
 esac
 
 here=$(pwd)
-rm -rf src surface bluetooth input nfc
+rm -rf src surface bluetooth input nfc media bridge
 mkdir src
 if [ -f "$here/cache/$tag.tar.gz" ]; then
 	echo "prepare-sources: using cached $tag"
@@ -48,7 +48,9 @@ if [ -f "$here/cache/$tag.tar.gz" ]; then
 else
 	git -C src init -q
 	git -C src sparse-checkout set --no-cone /drivers/platform/surface/ /net/bluetooth/ \
-		/drivers/input/misc/soc_button_array.c /drivers/nfc/nxp-nci/
+		/drivers/input/misc/soc_button_array.c /drivers/nfc/nxp-nci/ \
+		/drivers/media/i2c/ov13858.c /drivers/media/i2c/Kconfig /drivers/media/i2c/Makefile \
+		/drivers/media/pci/intel/ipu-bridge.c
 	fetched=
 	for repo in $repos; do
 		echo "prepare-sources: fetching $tag from $repo"
@@ -97,4 +99,11 @@ echo 'obj-m += soc_button_array.o' > input/Kbuild
 mkdir nfc
 cp src/drivers/nfc/nxp-nci/i2c.c src/drivers/nfc/nxp-nci/nxp-nci.h nfc/
 printf 'obj-m += nxp-nci_i2c.o\nnxp-nci_i2c-objs := i2c.o\n' > nfc/Kbuild
+
+# Cameras: ov13858 (patched), imx681 (new) and ipu-bridge (patched).
+mkdir media bridge
+cp src/drivers/media/i2c/ov13858.c src/drivers/media/i2c/imx681.c media/
+echo 'obj-m += ov13858.o imx681.o' > media/Kbuild
+cp src/drivers/media/pci/intel/ipu-bridge.c bridge/
+echo 'obj-m += ipu-bridge.o' > bridge/Kbuild
 rm -rf src

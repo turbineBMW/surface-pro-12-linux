@@ -11,6 +11,7 @@ pkg/*/src/
 pkg/*/pkg/
 pkg/limine/Limine/
 pkg/limine-arch/
+pkg/libcamera-sp12/libcamera/
 pkg/out/
 *.pkg.tar.*
 *.iso

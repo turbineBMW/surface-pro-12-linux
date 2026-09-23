@@ -6,6 +6,8 @@ all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/bluetooth modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/input modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/nfc modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/media modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/bridge modules
 
 clean:
-	rm -rf surface bluetooth input nfc src
+	rm -rf surface bluetooth input nfc media bridge src

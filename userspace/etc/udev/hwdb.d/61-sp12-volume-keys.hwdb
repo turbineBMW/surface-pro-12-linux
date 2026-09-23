@@ -1,8 +1,0 @@
-# Surface Pro 12 (Intel): the volume rocker comes out reversed with the stock
-# MSHW0040 mapping (_CRS GpioInt 2 = up, 4 = down). Swap the two keys of the
-# autorepeating gpio-keys device that soc_button_array creates for them
-# (button index 0 = volume up, 1 = volume down); the power-button device has
-# no EV_REP (ev:3) and is not matched.
-evdev:name:gpio-keys:phys:gpio-keys/input0:ev:100003:dmi:*:svnMicrosoftCorporation:pnSurfaceProforBusiness13in12thEdIntel:*
- KEYBOARD_KEY_0=volumedown
- KEYBOARD_KEY_1=volumeup

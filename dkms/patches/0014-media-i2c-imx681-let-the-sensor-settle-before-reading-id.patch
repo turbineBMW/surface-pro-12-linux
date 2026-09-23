@@ -1,0 +1,70 @@
+Subject: media: i2c: imx681: let the sensor settle before reading its ID
+
+After a warm reboot from Windows the IMX681 answered on I2C but returned
+0x0000 from the chip ID register 1-2 ms after reset release, so probe
+failed with -EIO and the front camera was missing until the module was
+reloaded. Wait 10 ms after releasing reset, and retry the ID read up to
+four more times 5 ms apart before failing.
+---
+--- a/drivers/media/i2c/imx681.c
++++ b/drivers/media/i2c/imx681.c
+@@ -72,8 +72,10 @@
+ #define IMX681_PIXEL_RATE		(IMX681_LINK_FREQ * 2 * IMX681_NUM_LANES / 10)
+ 
+ /* Power-on delay after reset deassert */
+-#define IMX681_RESET_DELAY_US		1000
++#define IMX681_RESET_DELAY_US		10000
+ #define IMX681_RESET_DELAY_RANGE_US	1000
++#define IMX681_ID_RETRIES		5
++#define IMX681_ID_RETRY_DELAY_US	5000
+ 
+ /* Post-standby-cancel stabilisation delays */
+ #define IMX681_INIT_DELAY_US		10000
+@@ -498,23 +500,37 @@ static int imx681_power_off(struct device *dev)
+ 
+ static int imx681_identify_module(struct imx681 *imx681)
+ {
+-	u64 val;
+-	int ret;
++	unsigned int i;
++	u64 val = 0;
++	int ret = 0;
++
++	/*
++	 * The sensor can still read 0x0000 from the ID register shortly after
++	 * reset release (seen after a warm reboot from Windows); retry before
++	 * failing the probe, which is not retried otherwise.
++	 */
++	for (i = 0; i < IMX681_ID_RETRIES; i++) {
++		if (i)
++			usleep_range(IMX681_ID_RETRY_DELAY_US,
++				     IMX681_ID_RETRY_DELAY_US + 1000);
++
++		ret = cci_read(imx681->cci, IMX681_REG_CHIP_ID, &val, NULL);
++		if (!ret && val == IMX681_CHIP_ID) {
++			if (i)
++				dev_dbg(imx681->dev, "chip ID read after %u retries\n", i);
++			return 0;
++		}
++	}
+ 
+-	ret = cci_read(imx681->cci, IMX681_REG_CHIP_ID, &val, NULL);
+ 	if (ret) {
+ 		dev_err(imx681->dev,
+ 			"failed to read chip ID register 0x0016: %d\n", ret);
+ 		return ret;
+ 	}
+ 
+-	if (val != IMX681_CHIP_ID) {
+-		dev_err(imx681->dev, "chip ID mismatch: 0x%04llx != 0x%04x\n",
+-			val, IMX681_CHIP_ID);
+-		return -EIO;
+-	}
+-
+-	return 0;
++	dev_err(imx681->dev, "chip ID mismatch: 0x%04llx != 0x%04x\n",
++		val, IMX681_CHIP_ID);
++	return -EIO;
+ }
+ 
+ static int imx681_init_controls(struct imx681 *imx681)

@@ -16,13 +16,14 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
 | Battery, AC, fan, temperatures, platform profiles | ✅ | same |
 | Tablet-mode switch (POS) | ✅ | zero-padded source-list fix; source-ID caching stops a posture event storm (~13% CPU) (`dkms/`) |
 | Lid-open wake from s2idle | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`); S0ix reached |
-| Power / volume buttons | ✅ | `soc_button_array` probe-order fix (`dkms/`) + volume-rocker swap (`userspace/`) |
+| Power / volume buttons | ✅ | `soc_button_array` probe-order fix (`dkms/`) |
 | NFC (NXP PN560) | partial | powers up and polls (`dkms/`); no tag detected yet (RF config) |
 | Flex Keyboard detached over Bluetooth | ✅ | LE legacy OOB SMP (`dkms/`) + `sp12-flex-pair` (`userspace/`) |
 | Accelerometer / ALS / auto-rotation | ✅ | Microsoft's ISH firmware (not redistributable, see below) |
 | Limine (Omarchy's bootloader) | ✅ with patches | NX_COMPAT + firmware-memory fix (`limine/`, `pkg/limine`) |
 | Limine `protocol: linux` | ❌ | freezes after handoff; `protocol: efi` / UKI works (see `docs/limine.md`) |
-| Cameras | upstream work | [linux-surface#2144](https://github.com/linux-surface/linux-surface/issues/2144); plan in `docs/peripheral-plan.md` |
+| Rear (OV13858) + front (IMX681) cameras | ✅ | `ov13858` power, new `imx681`, `ipu-bridge` entries (`dkms/`) + patched libcamera (`pkg/libcamera-sp12`); PipeWire/browsers via libcamera |
+| IR camera (VD55G0) | ❌ | planned (`docs/peripheral-plan.md`) |
 
 ## Layout
 
@@ -33,9 +34,10 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
   upstream stable tags for e.g. `linux-omarchy`), or uses a bundled `cache/`.
 - `userspace/` — `sp12-flex-pair` (Flex Keyboard Bluetooth pairing over the
   wired OOB channel), reconnect-on-detach (udev rule + service) and the
-  volume-rocker key swap (hwdb).
+  libcamera software-ISP default (`environment.d`).
 - `pkg/` — PKGBUILDs: `limine` (patched, `epoch=1`), `sp12-modules-dkms`,
-  `sp12-flex-tools`, `sp12-ish-firmware` (private, see below).
+  `sp12-flex-tools`, `libcamera-sp12` (libcamera 0.7.2 + IMX681 support),
+  `sp12-ish-firmware` (private, see below).
 - `iso/` — builds an Omarchy ISO with all of the above in its offline mirror
   (`build-sp12-iso.sh`, on top of the official omarchy-iso build).
 - `limine/` — the Limine/PicoEFI fixes, debugging patches, the Project Mu QEMU
