@@ -1,10 +1,11 @@
 # Flex Keyboard Bluetooth pairing over the wired connector and reconnect on
-# detach, for the Surface Pro 12 (Intel). Sources: ../../userspace.
+# detach, plus the volume-rocker key swap, for the Surface Pro 12 (Intel).
+# Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.0
+pkgver=1.1
 pkgrel=1
-pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing and reconnect-on-detach"
+pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, volume-rocker mapping"
 arch=('any')
 license=('MIT')
 options=('!debug')
@@ -17,6 +18,8 @@ package() {
 		"${pkgdir}/usr/lib/sp12/sp12-flex-bt-autoconnect"
 	install -Dm644 "$u/etc/udev/rules.d/99-sp12-flex-bt.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/99-sp12-flex-bt.rules"
+	install -Dm644 "$u/etc/udev/hwdb.d/61-sp12-volume-keys.hwdb" \
+		"${pkgdir}/usr/lib/udev/hwdb.d/61-sp12-volume-keys.hwdb"
 	sed 's|/usr/local/libexec/sp12-flex-bt-autoconnect|/usr/lib/sp12/sp12-flex-bt-autoconnect|' \
 		"$u/etc/systemd/system/sp12-flex-bt-connect.service" \
 		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-bt-connect.service"

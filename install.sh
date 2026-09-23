@@ -32,6 +32,8 @@ install -Dm755 "$u/usr/local/bin/sp12-flex-pair" /usr/local/bin/sp12-flex-pair
 install -Dm755 "$u/usr/local/libexec/sp12-flex-bt-autoconnect" /usr/local/libexec/sp12-flex-bt-autoconnect
 install -Dm644 "$u/etc/udev/rules.d/99-sp12-flex-bt.rules" /etc/udev/rules.d/99-sp12-flex-bt.rules
 install -Dm644 "$u/etc/systemd/system/sp12-flex-bt-connect.service" /etc/systemd/system/sp12-flex-bt-connect.service
+install -Dm644 "$u/etc/udev/hwdb.d/61-sp12-volume-keys.hwdb" /etc/udev/hwdb.d/61-sp12-volume-keys.hwdb
+systemd-hwdb update
 systemctl daemon-reload
 udevadm control --reload
 

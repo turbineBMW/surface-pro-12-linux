@@ -1,0 +1,36 @@
+Subject: Input: soc_button_array: defer MSHW0040 probe until its GPIOs exist
+
+The generic button path ignores -EPROBE_DEFER, so when soc_button_array
+probes before the Panther Lake pinctrl driver, MSHW0040 binds with no
+buttons (or stays unbound) and the power and volume keys never work.
+MSHW0040 has a real power-button GPIO at index 0, so look it up in the
+device check and defer until its provider is ready.
+
+From zR-JB in linux-surface/linux-surface#2144.
+---
+--- a/drivers/input/misc/soc_button_array.c
++++ b/drivers/input/misc/soc_button_array.c
+@@ -554,6 +554,7 @@ static int soc_device_check_MSHW0040(struct device *dev)
+ 	acpi_handle handle = ACPI_HANDLE(dev);
+ 	union acpi_object *result;
+ 	u64 oem_platform_rev = 0;	// valid revisions are nonzero
++	int gpio, irq, error;
+ 
+ 	// get OEM platform revision
+ 	result = acpi_evaluate_dsm_typed(handle, &MSHW0040_DSM_UUID,
+@@ -576,6 +577,15 @@ static int soc_device_check_MSHW0040(struct device *dev)
+ 
+ 	dev_dbg(dev, "OEM Platform Revision %llu\n", oem_platform_rev);
+ 
++	/*
++	 * The generic button path ignores -EPROBE_DEFER because some platforms
++	 * expose virtual GPIOs that never get a provider. MSHW0040 has a real
++	 * power-button GPIO at index 0, so wait for its provider here.
++	 */
++	error = soc_button_lookup_gpio(dev, 0, &gpio, &irq);
++	if (error == -EPROBE_DEFER)
++		return error;
++
+ 	return 0;
+ }
+ 

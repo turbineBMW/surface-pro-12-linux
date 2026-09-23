@@ -14,22 +14,26 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
 |---|---|---|
 | Flex Keyboard + touchpad (attached), hotplug | ✅ | SSAM registry entry `MSHW0743` (`dkms/`) |
 | Battery, AC, fan, temperatures, platform profiles | ✅ | same |
-| Tablet-mode switch (POS) | ✅ | zero-padded source-list fix (`dkms/`) |
-| Lid-open wake from s2idle | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`) |
+| Tablet-mode switch (POS) | ✅ | zero-padded source-list fix; source-ID caching stops a posture event storm (~13% CPU) (`dkms/`) |
+| Lid-open wake from s2idle | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`); S0ix reached |
+| Power / volume buttons | ✅ | `soc_button_array` probe-order fix (`dkms/`) + volume-rocker swap (`userspace/`) |
+| NFC (NXP PN560) | partial | powers up and polls (`dkms/`); no tag detected yet (RF config) |
 | Flex Keyboard detached over Bluetooth | ✅ | LE legacy OOB SMP (`dkms/`) + `sp12-flex-pair` (`userspace/`) |
 | Accelerometer / ALS / auto-rotation | ✅ | Microsoft's ISH firmware (not redistributable, see below) |
 | Limine (Omarchy's bootloader) | ✅ with patches | NX_COMPAT + firmware-memory fix (`limine/`, `pkg/limine`) |
 | Limine `protocol: linux` | ❌ | freezes after handoff; `protocol: efi` / UKI works (see `docs/limine.md`) |
-| Cameras, physical buttons | upstream work | [linux-surface#2144](https://github.com/linux-surface/linux-surface/issues/2144) |
+| Cameras | upstream work | [linux-surface#2144](https://github.com/linux-surface/linux-surface/issues/2144); plan in `docs/peripheral-plan.md` |
 
 ## Layout
 
 - `dkms/` — DKMS package `sp12-modules`: patched `surface_aggregator_registry`,
-  `surface_aggregator_tabletsw`, `surface_gpe` and `bluetooth`. `prepare-sources.sh`
+  `surface_aggregator_tabletsw`, `surface_gpe`, `bluetooth`, `soc_button_array` and
+  `nxp-nci_i2c`. `prepare-sources.sh`
   fetches the exact sources for the kernel being built (Arch `-archN` tags, or
   upstream stable tags for e.g. `linux-omarchy`), or uses a bundled `cache/`.
 - `userspace/` — `sp12-flex-pair` (Flex Keyboard Bluetooth pairing over the
-  wired OOB channel) and reconnect-on-detach (udev rule + service).
+  wired OOB channel), reconnect-on-detach (udev rule + service) and the
+  volume-rocker key swap (hwdb).
 - `pkg/` — PKGBUILDs: `limine` (patched, `epoch=1`), `sp12-modules-dkms`,
   `sp12-flex-tools`, `sp12-ish-firmware` (private, see below).
 - `iso/` — builds an Omarchy ISO with all of the above in its offline mirror

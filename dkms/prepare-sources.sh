@@ -40,14 +40,15 @@ arch)
 esac
 
 here=$(pwd)
-rm -rf src surface bluetooth
+rm -rf src surface bluetooth input nfc
 mkdir src
 if [ -f "$here/cache/$tag.tar.gz" ]; then
 	echo "prepare-sources: using cached $tag"
 	tar -xzf "$here/cache/$tag.tar.gz" -C src
 else
 	git -C src init -q
-	git -C src sparse-checkout set --no-cone /drivers/platform/surface/ /net/bluetooth/
+	git -C src sparse-checkout set --no-cone /drivers/platform/surface/ /net/bluetooth/ \
+		/drivers/input/misc/soc_button_array.c /drivers/nfc/nxp-nci/
 	fetched=
 	for repo in $repos; do
 		echo "prepare-sources: fetching $tag from $repo"
@@ -87,4 +88,13 @@ KB
 # Build only bluetooth.ko; rfcomm, bnep, hidp and 6lowpan stay stock.
 cp -r src/net/bluetooth bluetooth
 grep -vE '^obj-\$\(CONFIG_BT_(RFCOMM|BNEP|HIDP|6LOWPAN)\)' bluetooth/Makefile > bluetooth/Kbuild
+
+mkdir input
+cp src/drivers/input/misc/soc_button_array.c input/
+echo 'obj-m += soc_button_array.o' > input/Kbuild
+
+# Build only nxp-nci_i2c.ko; the nxp-nci core stays stock.
+mkdir nfc
+cp src/drivers/nfc/nxp-nci/i2c.c src/drivers/nfc/nxp-nci/nxp-nci.h nfc/
+printf 'obj-m += nxp-nci_i2c.o\nnxp-nci_i2c-objs := i2c.o\n' > nfc/Kbuild
 rm -rf src
