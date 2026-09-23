@@ -3,7 +3,7 @@
 # releases whose sources are bundled for offline builds (e.g. an ISO install).
 
 pkgname=sp12-modules-dkms
-pkgver=1.6
+pkgver=1.7
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): SSAM registry (Flex Keyboard, battery), tablet switch, lid wake, Bluetooth LE OOB pairing, chassis buttons, NFC, cameras (DKMS)"
 arch=('any')
@@ -16,7 +16,7 @@ build() {
 	rm -rf tree
 	cp -r "${startdir}/../../dkms" tree
 	cd tree
-	rm -rf cache src surface bluetooth input nfc media bridge
+	rm -rf cache src surface bluetooth input nfc media bridge ipu7
 	grep -q "^PACKAGE_VERSION=\"${pkgver}\"" dkms.conf
 	for k in ${SP12_CACHE_KVERS:-}; do
 		./prepare-sources.sh --cache "$k"

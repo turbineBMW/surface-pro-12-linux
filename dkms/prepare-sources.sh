@@ -40,7 +40,7 @@ arch)
 esac
 
 here=$(pwd)
-rm -rf src surface bluetooth input nfc media bridge
+rm -rf src surface bluetooth input nfc media bridge ipu7
 mkdir src
 if [ -f "$here/cache/$tag.tar.gz" ]; then
 	echo "prepare-sources: using cached $tag"
@@ -50,7 +50,7 @@ else
 	git -C src sparse-checkout set --no-cone /drivers/platform/surface/ /net/bluetooth/ \
 		/drivers/input/misc/soc_button_array.c /drivers/nfc/nxp-nci/ \
 		/drivers/media/i2c/ov13858.c /drivers/media/i2c/Kconfig /drivers/media/i2c/Makefile \
-		/drivers/media/pci/intel/ipu-bridge.c
+		/drivers/media/pci/intel/ipu-bridge.c /drivers/staging/media/ipu7/
 	fetched=
 	for repo in $repos; do
 		echo "prepare-sources: fetching $tag from $repo"
@@ -106,4 +106,13 @@ cp src/drivers/media/i2c/ov13858.c src/drivers/media/i2c/imx681.c media/
 echo 'obj-m += ov13858.o imx681.o' > media/Kbuild
 cp src/drivers/media/pci/intel/ipu-bridge.c bridge/
 echo 'obj-m += ipu-bridge.o' > bridge/Kbuild
+
+# IPU7 ISYS (snooped frame writes); intel-ipu7 itself stays stock.
+cp -r src/drivers/staging/media/ipu7 ipu7
+rm -f ipu7/Makefile ipu7/Kconfig
+cat > ipu7/Kbuild <<'KB'
+intel-ipu7-isys-objs += ipu7-isys.o ipu7-isys-csi2.o ipu7-isys-csi-phy.o \
+	ipu7-fw-isys.o ipu7-isys-video.o ipu7-isys-queue.o ipu7-isys-subdev.o
+obj-m += intel-ipu7-isys.o
+KB
 rm -rf src

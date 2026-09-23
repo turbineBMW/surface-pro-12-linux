@@ -25,7 +25,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 |---|---|---|---|---|
 | 1 | Power / volume buttons | `MSHW0040` `\_SB.MSBT` | **Fixed** (`0005` probe order). Volume order matches Windows (left = up), shipped as stock | `soc_button_array` (=m) |
 | 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
-| 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0015`, libcamera 0.7.2-4.2). Open: motion false-colour dashes (soft-ISP side), colour tuning | new `imx681` |
+| 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0016`, libcamera 0.7.2-4.2). Open: colour tuning, noise (soft ISP has no NR) | new `imx681` |
 | 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | unbound | `vd55g1` (=m) is the sibling part |
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Powers up and polls (`0006`); a credit card isn't detected** | RF config next |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
@@ -256,11 +256,16 @@ no source nodes, so no WirePlumber policy is needed). Both stream at 30 fps.
     frame 0x18D2, PLL2 0x12F (15 fps). Ours is B's clock at a 30 fps frame
     length, which is valid. So **Windows scales in its ISP rather than binning**,
     and Linux's tighter framing is the CPU soft ISP centre-cropping instead of
-    scaling. The motion dashes are then most likely cleaned up by Windows' ISP
-    (false-colour suppression / temporal NR), which libcamera's soft ISP lacks:
-    **Phase 6, ISP-side**, not a driver bug. The dash rate varies 0–52 per 80
-    frames with motion speed, so A/B tests need many runs
-    (`private/camera/tools/motion-test.sh`).
+    scaling. (An earlier theory that Windows' ISP cleans up the motion dashes
+    was wrong; see below.)
+  - ~~Motion dashes~~ **fixed (`0016`, DKMS 1.7):** they appeared on the **rear**
+    camera too, which ruled out the sensor. Cause: IPU7 ISYS output pins had
+    `link.is_snoop = 0` ("TODO: set the snoop bit"), so frames were written
+    without snooping the CPU cache, and x86 `dma_sync_*_for_cpu()` doesn't
+    invalidate. libcamera read stale 64-byte lines (32 px, one row) of each
+    buffer's previous frame wherever the scene had moved. Setting `is_snoop = 1`:
+    zero dashes on both cameras, still 30 fps. **Affects every IPU7 machine using
+    libcamera's soft ISP: report upstream.**
   - Green/grey cast under warm light: no CCM or tuned AWB yet (Phase 6).
   - The GPU and CPU ISPs pick different fields of view at 1920×1440.
 
@@ -312,5 +317,11 @@ until it's proven). Then decide whether it belongs in `nxp-nci`.
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
   ~13% CPU from boot. Include the payload layout `{source, old, new}`, the
   sources-list replay trigger, and the before/after numbers.
-- `0006` PN560 GPIO roles (with a working tag read), `0005` (zR-JB's, confirm
-  it's merged), and the volume rocker once Windows' behaviour is known.
+- **IPU7 ISYS snoop (`0016`):** linux-media (staging ipu7 maintainers). Stale-cache
+  dashes on any IPU7 laptop with libcamera's soft ISP; one-line fix, before/after
+  evidence.
+- **libcamera:** the IMX681 helper/properties (`pkg/libcamera-sp12` 0001–0003), the
+  AGC `exposureGainThreshold` (0004), and the GPU-ISP downscale aliasing reproducer.
+- **IMX681 driver fixes** (`0012`–`0015`) as review comments on linux-surface/kernel#176.
+- `0006` PN560 GPIO roles (with a working tag read) and `0005` (zR-JB's, confirm it's
+  merged).
