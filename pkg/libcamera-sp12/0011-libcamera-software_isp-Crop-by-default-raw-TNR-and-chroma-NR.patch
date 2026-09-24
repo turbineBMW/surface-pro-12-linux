@@ -1,0 +1,467 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 13:30:00 -0400
+Subject: [PATCH] libcamera: software_isp: Crop by default, raw TNR and chroma
+ NR
+
+Three changes to the CPU debayer:
+
+- Field of view. Binning the whole sensor for small outputs gives the
+  widest view, which is too wide for a front camera on video calls.
+  Crop the centre at full resolution by default, and bin only when
+  LIBCAMERA_SOFTISP_FOV=wide or `fov=wide` in
+  $XDG_CONFIG_HOME/sp12/camera.conf, read at each configure so a change
+  applies the next time a camera starts.
+
+- Temporal noise reduction on the unbinned path. Filter unpacked raw
+  lines as they are copied for debayering, with the binned path's
+  thresholds (each binned colour is also a single raw sample), after lens
+  shading. Each thread filters only the rows it outputs, so each history
+  row has one writer. Frame-to-frame noise on the cropped front camera
+  drops by about 40% at 30 fps; the rear camera, which is never soft
+  binned, gets TNR too.
+
+- Chroma noise reduction on the output. The chroma (B - Y, R - Y) of each
+  2x2 block goes through a 5x5 sigma filter at half resolution, averaging
+  only neighbours within a threshold (default 8, LIBCAMERA_SOFTISP_CNR, 0
+  turns it off), and is recombined with each pixel's own luma after
+  bilinear upsampling. It runs in three passes over all threads after
+  debayering, about 2 ms per 1080p frame with four threads. Colour
+  speckle on flat areas drops by about 40%; a threshold of 20 halved it
+  but flattened skin tones and lost a blind comparison, 8 won one.
+---
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -48,12 +48,13 @@
+ 
+ 	void configure(unsigned int yStart, unsigned int yEnd);
+ 	void process(uint32_t frame, const uint8_t *src, uint8_t *dst);
++	void chroma(unsigned int stage, uint8_t *dst);
+ 
+ private:
+ 	void setupInputMemcpy(const uint8_t *linePointers[]);
+ 	void shiftLinePointers(const uint8_t *linePointers[], const uint8_t *src);
+ 	void memcpyNextLine(const uint8_t *linePointers[]);
+-	void shadeLine(uint8_t *line, const uint8_t *src);
++	void processRawLine(uint8_t *line, const uint8_t *src);
+ 	void process2(uint32_t frame, const uint8_t *src, uint8_t *dst);
+ 	void process4(uint32_t frame, const uint8_t *src, uint8_t *dst);
+ 	void processBinned(uint32_t frame, const uint8_t *src, uint8_t *dst);
+@@ -653,6 +654,99 @@
+ }
+ 
+ /*
++ * LIBCAMERA_SOFTISP_CNR: "0" turns chroma noise reduction off; otherwise the
++ * threshold (default 8): neighbours whose chroma (B - Y, R - Y, 8-bit output
++ * levels, half resolution) differs by more than this are left out of the
++ * average, so colour edges stay put while speckle is smoothed. Luma is kept.
++ */
++void DebayerCpu::configureCnr(const Size &outputSize)
++{
++	const char *env = utils::secure_getenv("LIBCAMERA_SOFTISP_CNR");
++	const int threshold = env ? atoi(env) : 8;
++	const unsigned int bpp = outputConfig_.bpp / 8;
++
++	cnrEnabled_ = threshold > 0 && (bpp == 3 || bpp == 4) &&
++		      outputSize.width >= 4 && outputSize.height >= 4;
++	cnrThreshold_ = threshold;
++	cnrSize_ = Size(outputSize.width / 2, outputSize.height / 2);
++	cnrIn_.clear();
++	cnrOut_.clear();
++	cnrColumns_.clear();
++	if (cnrEnabled_) {
++		/* Input plane padded by two on each side for the 5x5 filter */
++		cnrIn_.resize(static_cast<size_t>(cnrSize_.width + 4) * (cnrSize_.height + 4) * 2);
++		cnrOut_.resize(static_cast<size_t>(cnrSize_.width) * cnrSize_.height * 2);
++
++		/* Left chroma column and its 1/256 weight for each output column */
++		const int cw = cnrSize_.width;
++		for (int ox = 0; ox < 2 * cw; ox++) {
++			const int fx = std::clamp((2 * ox - 1) * 64, 0, (cw - 1) * 256);
++			const int xa = std::min(fx >> 8, cw - 2);
++			cnrColumns_.emplace_back(xa, fx - xa * 256);
++		}
++	}
++
++	LOG(Debayer, Info)
++		<< "Chroma noise reduction "
++		<< (cnrEnabled_ ? "on (threshold " + std::to_string(cnrThreshold_) + ")" : "off");
++}
++
++/* Run a chroma stage on every thread over its share of rows, and wait */
++void DebayerCpu::runOnThreads(unsigned int stage, uint8_t *dst)
++{
++	workPendingMutex_.lock();
++	workPending_ = (1 << threads_.size()) - 1;
++	workPendingMutex_.unlock();
++
++	for (auto &thread : threads_)
++		thread->invokeMethod(&DebayerCpuThread::chroma,
++				     ConnectionTypeQueued, stage, dst);
++
++	MutexLocker locker(workPendingMutex_);
++	workPendingCv_.wait(locker, [&]() LIBCAMERA_TSA_REQUIRES(workPendingMutex_) {
++		return workPending_ == 0;
++	});
++}
++
++/*
++ * Whether a small output bins the whole sensor (wide) rather than cropping
++ * its centre at full resolution. LIBCAMERA_SOFTISP_FOV ("wide" or "crop")
++ * wins; otherwise `fov=wide` in $XDG_CONFIG_HOME/sp12/camera.conf, read at
++ * each configure, so a change applies the next time a camera starts.
++ * Cropping is the default.
++ */
++bool DebayerCpu::wideFieldOfView() const
++{
++	const char *env = utils::secure_getenv("LIBCAMERA_SOFTISP_FOV");
++	if (env)
++		return !strcmp(env, "wide");
++
++	std::string path;
++	if (const char *xdg = utils::secure_getenv("XDG_CONFIG_HOME"); xdg && *xdg)
++		path = xdg;
++	else if (const char *home = utils::secure_getenv("HOME"); home && *home)
++		path = std::string(home) + "/.config";
++	else
++		return false;
++	path += "/sp12/camera.conf";
++
++	FILE *file = fopen(path.c_str(), "r");
++	if (!file)
++		return false;
++
++	bool wide = false;
++	char line[128];
++	while (fgets(line, sizeof(line), file)) {
++		char value[16];
++		if (sscanf(line, " fov = %15s", value) == 1)
++			wide = !strcmp(value, "wide");
++	}
++	fclose(file);
++
++	return wide;
++}
++
++/*
+  * LIBCAMERA_SOFTISP_TNR: "0" turns temporal noise reduction off; otherwise
+  * "alpha,base,slope" (defaults 64,24,3): alpha is the weight of a new frame
+  * in still areas (/256), and a change larger than base + slope * sqrt(value)
+@@ -664,7 +758,8 @@
+ 	double base = 24.0, slope = 3.0;
+ 	const char *env = utils::secure_getenv("LIBCAMERA_SOFTISP_TNR");
+ 
+-	tnrEnabled_ = binning_;
++	/* The unbinned path filters unpacked raw lines as they are copied */
++	tnrEnabled_ = binning_ || (lscRawShadable_ && inputConfig_.patternSize.height == 2);
+ 	if (env) {
+ 		if (!strcmp(env, "0"))
+ 			tnrEnabled_ = false;
+@@ -680,9 +775,12 @@
+ 	}
+ 
+ 	tnrPrimed_ = false;
++	tnrRaw_ = tnrEnabled_ && !binning_;
+ 	tnrHistory_.clear();
+-	if (tnrEnabled_)
++	if (binning_ && tnrEnabled_)
+ 		tnrHistory_.resize(static_cast<size_t>(window_.width / 2) * (window_.height / 2) * 3);
++	else if (tnrRaw_)
++		tnrHistory_.resize(static_cast<size_t>(window_.width) * window_.height);
+ 
+ 	LOG(Debayer, Info)
+ 		<< "Temporal noise reduction " << (tnrEnabled_ ? "on" : "off")
+@@ -999,6 +1097,8 @@
+ 	SizeRange outSizeRange = sizes(inputCfg.pixelFormat, inputCfg.size);
+ 	std::tie(outputConfig_.stride, outputConfig_.frameSize) =
+ 		strideAndFrameSize(outputCfg.pixelFormat, outputCfg.size);
++	/* For the chroma noise reduction, which walks output pixels */
++	getOutputConfig(outputCfg.pixelFormat, outputConfig_);
+ 
+ 	if (!outSizeRange.contains(outputCfg.size) || outputConfig_.stride != outputCfg.stride) {
+ 		LOG(Debayer, Error)
+@@ -1030,7 +1130,7 @@
+ 	 * debayered image: it keeps the field of view and averages away noise.
+ 	 */
+ 	Size window = outputCfg.size;
+-	binning_ = debayerBinned_ && inputConfig_.patternSize.height == 2 &&
++	binning_ = debayerBinned_ && wideFieldOfView() && inputConfig_.patternSize.height == 2 &&
+ 		   outputCfg.size.width * 2 <= inputCfg.size.width &&
+ 		   outputCfg.size.height * 2 <= inputCfg.size.height;
+ 	if (binning_)
+@@ -1048,6 +1148,7 @@
+ 		<< " to " << outputCfg.size;
+ 
+ 	configureTnr();
++	configureCnr(outputCfg.size);
+ 
+ 	/*
+ 	 * LIBCAMERA_SOFTISP_LSC sets the lens-shading strength, as an exponent
+@@ -1106,7 +1207,7 @@
+ 	lineBufferLength_ = debayer_->window_.width * inputConfig.bpp / 8 +
+ 			    2 * lineBufferPadding_;
+ 
+-	copyLines_ = enableInputMemcpy_ || debayer_->lscRaw_;
++	copyLines_ = enableInputMemcpy_ || debayer_->lscRaw_ || debayer_->tnrRaw_;
+ 	if (copyLines_) {
+ 		for (unsigned int i = 0; i <= inputConfig.patternSize.height; i++)
+ 			lineBuffers_[i].resize(lineBufferLength_);
+@@ -1162,7 +1263,7 @@
+ 		memcpy(lineBuffers_[i].data(),
+ 		       linePointers[i + 1] - lineBufferPadding_,
+ 		       lineBufferLength_);
+-		shadeLine(lineBuffers_[i].data(), linePointers[i + 1]);
++		processRawLine(lineBuffers_[i].data(), linePointers[i + 1]);
+ 		linePointers[i + 1] = lineBuffers_[i].data() + lineBufferPadding_;
+ 	}
+ 
+@@ -1191,29 +1292,176 @@
+ 	memcpy(lineBuffers_[lineBufferIndex_].data(),
+ 	       linePointers[patternHeight] - lineBufferPadding_,
+ 	       lineBufferLength_);
+-	shadeLine(lineBuffers_[lineBufferIndex_].data(), linePointers[patternHeight]);
++	processRawLine(lineBuffers_[lineBufferIndex_].data(), linePointers[patternHeight]);
+ 	linePointers[patternHeight] = lineBuffers_[lineBufferIndex_].data() + lineBufferPadding_;
+ 
+ 	lineBufferIndex_ = (lineBufferIndex_ + 1) % (patternHeight + 1);
+ }
+ 
+ /*
+- * Apply lens shading to a copied raw line, padding included. The source line
+- * pointer gives its row; rows just outside the window use the nearest one.
++ * Apply lens shading and temporal noise reduction to a copied raw line. The
++ * source line pointer gives its row. Shading covers the padding, and rows
++ * just outside the window use the nearest row's gains. Only rows this thread
++ * outputs are filtered, as each has one history; their neighbours from other
++ * threads are left as they are.
+  */
+-void DebayerCpuThread::shadeLine(uint8_t *line, const uint8_t *src)
++void DebayerCpuThread::processRawLine(uint8_t *line, const uint8_t *src)
+ {
+-	if (!debayer_->lscRaw_ || debayer_->lscMap_.empty())
+-		return;
+-
+ 	const int height = debayer_->window_.height;
+-	const long row = std::clamp<long>((src - windowBase_) / static_cast<long>(debayer_->inputConfig_.stride),
+-					  0, height - 1);
+-	const uint16_t *gains = debayer_->lscMap_.data() + row * debayer_->lscMapStride_;
++	const long row = (src - windowBase_) / static_cast<long>(debayer_->inputConfig_.stride);
++	const unsigned int width = debayer_->window_.width;
++	const unsigned int pad = lineBufferPadding_ / 2;
+ 	uint16_t *pixels = reinterpret_cast<uint16_t *>(line);
+ 
+-	for (unsigned int x = 0; x < debayer_->lscMapStride_; x++)
+-		pixels[x] = debayer_->shade(pixels[x], gains[x]);
++	if (debayer_->lscRaw_ && !debayer_->lscMap_.empty()) {
++		const long gainRow = std::clamp<long>(row, 0, height - 1);
++		const uint16_t *gains = debayer_->lscMap_.data() + gainRow * debayer_->lscMapStride_;
++
++		for (unsigned int x = 0; x < debayer_->lscMapStride_; x++)
++			pixels[x] = debayer_->shade(pixels[x], gains[x]);
++	}
++
++	if (debayer_->tnrRaw_ && row >= static_cast<long>(yStart_) &&
++	    row < static_cast<long>(yEnd_)) {
++		uint16_t *hist = debayer_->tnrHistory_.data() + row * width;
++		uint16_t *p = pixels + pad;
++
++		for (unsigned int x = 0; x < width; x++)
++			p[x] = debayer_->temporalFilter(hist[x], p[x]);
++	}
++}
++
++/*
++ * Chroma noise reduction, in stages over this thread's share of the half
++ * resolution rows: 0 computes the chroma of each 2x2 output block into a plane
++ * padded by two on each side, 1 filters it (a 5x5 sigma filter), 2 rebuilds
++ * the output pixels from their own luma and the filtered chroma, upsampled
++ * bilinearly.
++ */
++void DebayerCpuThread::chroma(unsigned int stage, uint8_t *dst)
++{
++	constexpr int kPad = 2;
++	const unsigned int stride = debayer_->outputConfig_.stride;
++	const unsigned int bpp = debayer_->outputConfig_.bpp / 8;
++	/* Byte positions of red and blue in an output pixel */
++	const unsigned int ri = debayer_->swapRedBlueGains_ ? 0 : 2;
++	const unsigned int bi = 2 - ri;
++	const int cw = debayer_->cnrSize_.width;
++	const int ch = debayer_->cnrSize_.height;
++	const int pw = cw + 2 * kPad;
++	const unsigned int threads = debayer_->threads_.size();
++	const int y0 = ch * threadIndex_ / threads;
++	const int y1 = ch * (threadIndex_ + 1) / threads;
++	int16_t *in = debayer_->cnrIn_.data();
++	int16_t *out = debayer_->cnrOut_.data();
++
++	auto luma = [](int r, int g, int b) { return (77 * r + 150 * g + 29 * b + 128) >> 8; };
++	auto padded = [&](int y) { return in + ((y + kPad) * pw + kPad) * 2; };
++
++	if (stage == 0) {
++		for (int y = y0; y < y1; y++) {
++			const uint8_t *l0 = dst + 2 * y * stride;
++			const uint8_t *l1 = l0 + stride;
++			int16_t *c = padded(y);
++
++			for (int x = 0; x < cw; x++) {
++				const uint8_t *p[4] = { l0 + 2 * x * bpp, l0 + (2 * x + 1) * bpp,
++							l1 + 2 * x * bpp, l1 + (2 * x + 1) * bpp };
++				int cb = 0, cr = 0;
++				for (const uint8_t *q : p) {
++					const int yv = luma(q[ri], q[1], q[bi]);
++					cb += q[bi] - yv;
++					cr += q[ri] - yv;
++				}
++				c[2 * x] = cb; /* x4 */
++				c[2 * x + 1] = cr;
++			}
++
++			/* Replicate the edge columns into the padding */
++			for (int k = 1; k <= kPad; k++) {
++				c[-2 * k] = c[0];
++				c[-2 * k + 1] = c[1];
++				c[2 * (cw - 1 + k)] = c[2 * (cw - 1)];
++				c[2 * (cw - 1 + k) + 1] = c[2 * (cw - 1) + 1];
++			}
++		}
++	} else if (stage == 1) {
++		/* Top and bottom padding rows, by the threads that read them */
++		if (y0 == 0)
++			for (int k = 1; k <= kPad; k++)
++				std::copy_n(padded(0) - 2 * kPad, pw * 2, padded(-k) - 2 * kPad);
++		if (y1 == ch)
++			for (int k = 1; k <= kPad; k++)
++				std::copy_n(padded(ch - 1) - 2 * kPad, pw * 2, padded(ch - 1 + k) - 2 * kPad);
++
++		const int thr = debayer_->cnrThreshold_ * 4;
++
++		for (int y = y0; y < y1; y++) {
++			const int16_t *c = padded(y);
++			int16_t *o = out + y * cw * 2;
++
++			for (int x = 0; x < cw; x++, c += 2, o += 2) {
++				const int c0 = c[0];
++				const int c1 = c[1];
++				int sumB = 0, sumR = 0, n = 0;
++				for (int dy = -kPad; dy <= kPad; dy++) {
++					const int16_t *q = c + (dy * pw - kPad) * 2;
++					for (int dx = 0; dx <= 2 * kPad; dx++, q += 2) {
++						/* All ones when the neighbour is close enough */
++						const int m = -(std::abs(q[0] - c0) + std::abs(q[1] - c1) <= thr);
++						sumB += q[0] & m;
++						sumR += q[1] & m;
++						n -= m;
++					}
++				}
++				o[0] = sumB / n;
++				o[1] = sumR / n;
++			}
++		}
++	} else {
++		/*
++		 * Rebuild output rows 2*y0 .. 2*y1 - 1. The upsampling reads the
++		 * filtered chroma of neighbouring rows, hence a separate stage.
++		 */
++		const std::vector<std::pair<int, int>> &cols = debayer_->cnrColumns_;
++
++		for (int oy = 2 * y0; oy < 2 * y1; oy++) {
++			/* Output pixel centres in half-resolution units of 1/256 */
++			const int fy = std::clamp((2 * oy - 1) * 64, 0, (ch - 1) * 256);
++			const int ya = std::min(fy >> 8, ch - 2);
++			const int wy = fy - ya * 256;
++			const int16_t *rowA = out + ya * cw * 2;
++			const int16_t *rowB = rowA + cw * 2;
++			uint8_t *p = dst + oy * stride;
++
++			for (int ox = 0; ox < 2 * cw; ox++, p += bpp) {
++				const auto [xa, wx] = cols[ox];
++				const int16_t *a = rowA + xa * 2;
++				const int16_t *b = rowB + xa * 2;
++				const int top0 = a[0] * (256 - wx) + a[2] * wx;
++				const int top1 = a[1] * (256 - wx) + a[3] * wx;
++				const int bot0 = b[0] * (256 - wx) + b[2] * wx;
++				const int bot1 = b[1] * (256 - wx) + b[3] * wx;
++				/* 1/65536 for the weights, 1/4 for the 2x2 sums */
++				const int cb = (top0 * (256 - wy) + bot0 * wy + (1 << 17)) >> 18;
++				const int cr = (top1 * (256 - wy) + bot1 * wy + (1 << 17)) >> 18;
++
++				const int yv = luma(p[ri], p[1], p[bi]);
++				const int r = std::clamp(yv + cr, 0, 255);
++				const int bl = std::clamp(yv + cb, 0, 255);
++				/* 437 / 65536 is 1 / 150 */
++				const int g = std::clamp(((256 * yv - 77 * r - 29 * bl) * 437 + 32768) >> 16, 0, 255);
++				p[ri] = r;
++				p[1] = g;
++				p[bi] = bl;
++			}
++		}
++	}
++
++	debayer_->workPendingMutex_.lock();
++	debayer_->workPending_ &= ~(1 << threadIndex_);
++	debayer_->workPendingMutex_.unlock();
++	debayer_->workPendingCv_.notify_one();
+ }
+ 
+ /**
+@@ -1518,7 +1766,8 @@
+ 	metadata.timestamp = input->metadata().timestamp;
+ 
+ 	MappedFrameBuffer in(input, MappedFrameBuffer::MapFlag::Read);
+-	MappedFrameBuffer out(output, MappedFrameBuffer::MapFlag::Write);
++	MappedFrameBuffer out(output, cnrEnabled_ ? MappedFrameBuffer::MapFlag::ReadWrite
++						  : MappedFrameBuffer::MapFlag::Write);
+ 	if (!in.isValid() || !out.isValid()) {
+ 		LOG(Debayer, Error) << "mmap-ing buffer(s) failed";
+ 		metadata.status = FrameMetadata::FrameError;
+@@ -1543,6 +1792,11 @@
+ 		});
+ 	}
+ 
++	if (cnrEnabled_) {
++		for (unsigned int stage = 0; stage < 3; stage++)
++			runOnThreads(stage, out.planes()[0].data());
++	}
++
+ 	metadata.planes()[0].bytesused = out.planes()[0].size();
+ 
+ 	dmaSyncers.clear();
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -13,6 +13,7 @@
+ 
+ #include <memory>
+ #include <stdint.h>
++#include <utility>
+ #include <vector>
+ 
+ #include <libcamera/base/mutex.h>
+@@ -112,6 +113,9 @@
+ 					      float x, float y) const;
+ 	int temporalFilter(uint16_t &hist, int value);
+ 	void configureTnr();
++	void configureCnr(const Size &outputSize);
++	void runOnThreads(unsigned int stage, uint8_t *dst);
++	bool wideFieldOfView() const;
+ 
+ 	/* 8-bit raw bayer format */
+ 	template<bool addAlphaByte, bool ccmEnabled>
+@@ -196,6 +200,16 @@
+ 	double tnrRawScale_;                       /* raw units per 10-bit unit */
+ 	bool tnrEnabled_;
+ 	bool tnrPrimed_;
++	/* Filter raw lines as they are copied (unbinned path) */
++	bool tnrRaw_;
++
++	/* Chroma noise reduction on the output, at half resolution */
++	bool cnrEnabled_;
++	int cnrThreshold_;
++	Size cnrSize_;
++	std::vector<int16_t> cnrIn_;  /* B - Y, R - Y interleaved */
++	std::vector<int16_t> cnrOut_;
++	std::vector<std::pair<int, int>> cnrColumns_;
+ 
+ 	/*
+ 	 * Lens shading on the binned path: the tuning file's tables, and for
+-- 
+2.53.0

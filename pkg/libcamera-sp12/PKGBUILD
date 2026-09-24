@@ -13,7 +13,7 @@ pkgname=(
   libcamera-tools
 )
 pkgver=0.7.2
-pkgrel=4.10
+pkgrel=4.11
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 IMX681 support)"
 arch=(x86_64)
 url="https://libcamera.org/"
@@ -49,8 +49,12 @@ source=(
   0008-libcamera-software_isp-debayer_cpu-Add-temporal-noise-reduction.patch
   0009-libcamera-software_isp-Add-lens-shading-correction.patch
   0010-ipa-simple-awb-Use-grey-zones-and-the-illuminant-locus.patch
+  0011-libcamera-software_isp-Crop-by-default-raw-TNR-and-chroma-NR.patch
+  configuration.yaml
 )
 sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
+            SKIP
+            SKIP
             SKIP
             SKIP
             SKIP
@@ -130,6 +134,9 @@ package_libcamera() {
 
   meson install -C build --destdir "$pkgdir"
   install -vDm 644 $pkgbase/LICENSES/{BSD-3-Clause,Linux-syscall-note,MIT}.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+
+  # Surface Pro 12: more soft ISP threads (/etc/libcamera/ overrides it)
+  install -vDm 644 "$srcdir/configuration.yaml" -t "$pkgdir/usr/share/libcamera/"
 
   (
     cd "$pkgdir"

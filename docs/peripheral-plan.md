@@ -490,6 +490,18 @@ Done (libcamera-sp12 4.7):
   green cast. The CCT for the CCM comes from the locus. Blind A/B: this fixed the
   rear's cyan whites (warm floor/cardboard had fooled grey world); the front was a tie.
 - The PKGBUILD applied `../000*.patch`; patches from 0010 on need `00[0-9][0-9]-*`.
+- `0011` (4.11):
+  - **FOV:** 1080p front defaults to the centre crop at full resolution (the user found
+    the binned full sensor too wide). `sp12-camera-fov crop|wide|toggle` (tools 1.10)
+    writes `fov=` to `~/.config/sp12/camera.conf`, read at each camera start;
+    `LIBCAMERA_SOFTISP_FOV` overrides it.
+  - **Raw TNR:** TNR on the unbinned path, applied to raw lines as they're copied (after
+    lens shading), so the crop and the rear camera get it: ~40% less frame-to-frame noise.
+  - **Chroma NR:** a half-resolution 5x5 sigma filter on B-Y/R-Y, with luma kept; default
+    threshold 8 (`LIBCAMERA_SOFTISP_CNR`). Threshold 20 flattened skin tones and lost a
+    blind A/B to off; 8 beat off.
+  - **Threads:** libcamera-sp12 ships `/usr/share/libcamera/configuration.yaml` with 4 soft
+    ISP threads (default 2): ~20 ms per 1080p frame with everything on.
 
 Still open:
 - GPU mode: retest when libcamera's multi-pass GPU ISP lands (the one-pass one
@@ -502,6 +514,26 @@ flow on the GPU) or a learned video denoiser (FastDVDnet-like). Panther Lake has
 NPU and an Xe GPU that OpenVINO can use on Linux. Scope: a real-time 1080p30
 model/pipeline between libcamera and apps (v4l2loopback or a PipeWire filter), its
 power cost, and how apps pick it up.
+
+Spike (2026-09-24): OpenVINO 2026.3 with NPU and GPU plugins, all from Arch `extra`.
+The NPU needed a `uaccess` udev tag: the package makes `/dev/accel/accel0` 0660
+root:render (`/etc/udev/rules.d/70-intel-npu-uaccess.rules`, local). Benchmarks of a
+FastDVDnet-shaped net (random weights, `private/camera/denoise/bench_fastdvd.py`,
+streaming, so two DenBlocks per frame):
+
+| Net | Resolution | Device | Speed |
+|---|---|---|---|
+| full width | 1080p | GPU | 4.7 fps |
+| 1/2 width | 1080p | GPU | 10 fps |
+| 1/4 width | 1080p | GPU | 19 fps |
+| 1/4 width | 1920x544 tiles | NPU | 24 tiles/s (~12 fps) |
+
+The NPU compiler (intel-npu-compiler 2026.28) segfaults on most 1080p and 1/2-width
+graphs. Only the paper's full net has pretrained weights, and even a slim net would
+need training. ffmpeg `nlmeans_vulkan` (p=5, r=7) manages 22 fps at 1080p; CPU `hqdn3d`
+~195 fps. Conclusion: learned 1080p30 video denoise isn't viable on this machine
+today. Revisit with a newer NPU compiler, or at 720p (what Teams sends) with a
+trained slim model.
 
 ### Phase 8: last items
 #### 8a: pen cradle detection
