@@ -437,6 +437,34 @@ or colour matrix. Research Intel's out-of-tree IPU7 PSYS driver and camera HAL
 (closed components) on Arch: what exists, how it coexists with PipeWire/libcamera,
 and whether our DKMS/package approach can carry it.
 
+Findings (2026-09-24), hardware ISP not viable for now:
+- Intel's stack: `intel/ipu7-drivers` (PSYS module; on kernels >= 6.17 it builds only
+  PSYS against the staging core; tested up to 7.0), `ipu7-camera-hal` (Panther Lake
+  = `ipu75xa`), proprietary `ipu7-camera-bins`, and `icamerasrc` → v4l2loopback.
+  PSYS isn't upstream and isn't headed there (the 2026-09 ISYS series doesn't cover it).
+- PSYS can't run on the staging core. Its headers add `acquire_fw_task_buffer_lock`
+  and `get_running_fw_task_count` to `struct ipu7_bus_device`, and it locks and
+  writes them; the staging core allocates the smaller struct and never initialises
+  the mutex, so loading it corrupts memory (intel/ipu7-drivers issue #63). It also
+  needs `isp->ipu7_dir`, and the MMU `tlb_invalidate(mmu, mmu_id)` signature differs.
+  Intel's own v7.0 staging patch series doesn't add these. The only consistent route
+  is Intel's whole out-of-tree core+ISYS+PSYS, ported to 7.2 with our `0016`/`0020`/
+  `0021` redone on it.
+- The HAL needs a per-sensor graph-settings binary (Intel-generated, schema-hashed).
+  Linux ones exist for OV13B10, OV08X40, OV8856, OV05C10 and IMX471, not for IMX681
+  or OV13858. Windows' `graph_settings_*.bin` are a different format (header
+  `0x5c63b5e7` with embedded output modes) and can't be used.
+- Revisit if Intel publishes graph settings for these sensors or PSYS goes upstream.
+  Meanwhile improve the software ISP (Phase 7B).
+
+### Phase 7B: software ISP from the Windows tuning
+- AWB: anchor the grey-world estimate to each module's illuminant locus (the `.aiqb`
+  CCM records carry per-illuminant chromaticity/gain values).
+- Lens shading: find the LSC tables in the `.aiqb` and check what libcamera's software
+  ISP can apply.
+- GPU mode: retest when libcamera's multi-pass GPU ISP lands (the one-pass one
+  aliases the IMX681 mosaic when downscaling).
+
 ### Phase 8: last items
 #### 8a: pen cradle detection
 How Windows knows the Slim Pen has left its charging cradle in the Flex Keyboard
