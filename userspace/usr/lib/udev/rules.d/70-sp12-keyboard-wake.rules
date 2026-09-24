@@ -1,0 +1,5 @@
+# Surface Pro 12: let the attached Flex Keyboard wake the system. The EC signals
+# pending events on the SSAM wake line during suspend; sp12-modules 1.13 keeps
+# battery events off over suspend, so only input (keys, touchpad, cover) wakes.
+ACTION=="add|bind", SUBSYSTEM=="serial", ATTR{modalias}=="acpi:MSHW0084:*", \
+  TEST=="power/wakeup", ATTR{power/wakeup}="enabled"

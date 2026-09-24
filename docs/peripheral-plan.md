@@ -363,9 +363,26 @@ Results (2026-09-23):
   but so did the keyboard's own chatter 6 s into an untouched suspend. BlueZ logged
   "wake event 0x1" (unexpected event), not a remote wake, for both. Reverted: keys
   on the detached keyboard don't wake it; the power button does.
-- Next candidate: filtered wake. Wake briefly, check the event, go back to sleep
-  unless it's a key press. It's needed for the attached keyboard (SSAM, above) and
-  would make Bluetooth wake usable too.
+- **Attached keyboard wake: done (2026-09-24, sp12-modules 1.13, tools 1.13).**
+  - **Cause:** the keyboard *looks* dead in suspend (no backlight, no haptics)
+    because display-off turns those off, but key presses still reach the EC. The EC
+    holds them and raises the SSAM wake line.
+  - **Tests** (SSAM wake on, 5 min each, event tracing): on battery, the tablet
+    slept until the RTC alarm and a spacebar press woke it instantly. While
+    charging, a BAT event (`0x53`, "TurboPowerUpdate") woke it after 133 s.
+  - **DKMS `0025`:** `surface_battery`/`surface_charger` unregister their BAT
+    notifiers on suspend (the EC event is disabled once both refs drop) and
+    re-register on resume. Charging then slept the full 5 min.
+  - **tools `70-sp12-keyboard-wake.rules`:** enables `serial0-0` (MSHW0084) wakeup.
+  - **Still wake sources:** keys, the touchpad, and POS (keyboard attach/detach)
+    events.
+  - **Windows reference:** its SSH driver releases held events with SAM command
+    `0x17` (GPIO callback, in `SurfaceSerialHubPassiveLevelCallbackGpioTarget`) and
+    sends display off/on (`0x15`/`0x16`) on console display state, D0 exit/entry
+    (`0x33`/`0x34`) as "UART sleep". Linux doesn't need `0x17`: display-on at
+    resume releases them all.
+- Bluetooth keyboard wake is still open (the controller woke on keyboard chatter;
+  a filtered wake would need BlueZ-side filtering).
 
 ### Phase 4b: ambient light sensor and auto-brightness (done)
 `sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows

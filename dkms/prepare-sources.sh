@@ -52,7 +52,7 @@ else
 		/drivers/media/i2c/ov13858.c /drivers/media/i2c/vd55g1.c \
 		/drivers/media/i2c/Kconfig /drivers/media/i2c/Makefile \
 		/drivers/media/pci/intel/ipu-bridge.c /drivers/staging/media/ipu7/ \
-		/drivers/power/supply/surface_battery.c
+		/drivers/power/supply/surface_battery.c /drivers/power/supply/surface_charger.c
 	fetched=
 	for repo in $repos; do
 		echo "prepare-sources: fetching $tag from $repo"
@@ -119,8 +119,8 @@ intel-ipu7-isys-objs += ipu7-isys.o ipu7-isys-csi2.o ipu7-isys-csi-phy.o \
 obj-m += intel-ipu7-isys.o
 KB
 
-# Battery charge limit.
+# Battery charge limit; battery events off over suspend (keyboard wake).
 mkdir power
-cp src/drivers/power/supply/surface_battery.c power/
-echo 'obj-m += surface_battery.o' > power/Kbuild
+cp src/drivers/power/supply/surface_battery.c src/drivers/power/supply/surface_charger.c power/
+echo 'obj-m += surface_battery.o surface_charger.o' > power/Kbuild
 rm -rf src

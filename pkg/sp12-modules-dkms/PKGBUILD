@@ -3,9 +3,9 @@
 # releases whose sources are bundled for offline builds (e.g. an ISO install).
 
 pkgname=sp12-modules-dkms
-pkgver=1.12
+pkgver=1.13
 pkgrel=1
-pkgdesc="Surface Pro 12 (Intel): SSAM registry (Flex Keyboard, battery), tablet switch, lid wake, Bluetooth LE OOB pairing, chassis buttons, NFC, cameras incl. IR, battery charge limit (DKMS)"
+pkgdesc="Surface Pro 12 (Intel): SSAM registry (Flex Keyboard, battery), tablet switch, lid wake, Bluetooth LE OOB pairing, chassis buttons, NFC, cameras incl. IR, battery charge limit, keyboard wake (DKMS)"
 arch=('any')
 url="https://github.com/linux-surface/linux-surface/issues/2144"
 license=('GPL-2.0-only')
