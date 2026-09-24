@@ -1,11 +1,11 @@
 # Surface Pro 12 (Intel) userspace: Flex Keyboard Bluetooth pairing over the
-# wired connector and reconnect on detach, the libcamera software-ISP default,
-# the IR camera wiring, the ambient light sensor stream, and Bluetooth
-# touchpad/keyboard integration for the Flex Keyboard.
+# wired connector, reconnect on detach and Bluetooth touchpad/keyboard
+# integration; Slim Pen pairing; the libcamera software-ISP default; the IR
+# camera wiring; and the ambient light sensor stream.
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.8
+pkgver=1.9
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, IR camera wiring, ambient light stream"
 arch=('any')
@@ -17,6 +17,7 @@ optdepends=('libcamera: cameras' 'pipewire-libcamera: cameras in PipeWire apps a
 package() {
 	local u="${startdir}/../../userspace"
 	install -Dm755 "$u/usr/local/bin/sp12-flex-pair" "${pkgdir}/usr/bin/sp12-flex-pair"
+	install -Dm755 "$u/usr/local/bin/sp12-pen-pair" "${pkgdir}/usr/bin/sp12-pen-pair"
 	install -Dm755 "$u/usr/local/libexec/sp12-flex-bt-autoconnect" \
 		"${pkgdir}/usr/lib/sp12/sp12-flex-bt-autoconnect"
 	install -Dm644 "$u/etc/udev/rules.d/99-sp12-flex-bt.rules" \

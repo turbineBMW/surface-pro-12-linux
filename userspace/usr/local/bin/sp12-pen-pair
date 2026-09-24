@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Pair the Surface Slim Pen 2 over ordinary BLE (Just Works) so its tail button
+# works on Linux. No root needed. Ported from turbineBMW/surface-pro-11-linux.
+#
+# Hold the pen's tail button 5-7 s until the LED blinks (pairing mode), then:
+#
+#   sp12-pen-pair [--wait SECONDS]
+#
+# Tail-button presses then arrive as Meta+F20 (click), Meta+F19 (double click)
+# and Meta+F18 (press and hold) -- Microsoft's Win+F18/F19/F20 contract. Bind
+# them in the compositor.
+#
+# Windows never bonds the pen (it uses a "loosely coupled" scheme), so this
+# bond is Linux-only and Windows keeps working. Docking the pen in the keyboard
+# switches it to that loosely coupled mode, where its radio is silent: after
+# undocking, hold the tail button ~7 s and the existing bond reconnects.
+set -u
+WAIT=120
+[ "${1:-}" = --wait ] && WAIT=$2
+
+pen_seen() {
+    bluetoothctl devices | grep -i -E '^Device [0-9A-F:]{17} .*Pen' | head -1 | awk '{print $2}'
+}
+
+echo "looking for the pen for ${WAIT}s -- hold the tail button until the LED blinks"
+# Keep scanning until pairing is done: BlueZ forgets a device it only saw in a
+# scan shortly after the scan stops.
+bluetoothctl --timeout "$WAIT" scan le > /dev/null 2>&1 &
+scan=$!
+trap 'kill $scan 2>/dev/null' EXIT
+found=
+end=$((SECONDS + WAIT))
+while [ $SECONDS -lt $end ]; do
+    found=$(pen_seen)
+    [ -n "$found" ] && break
+    sleep 1
+done
+if [ -z "$found" ]; then
+    echo "pen not seen. Is it in pairing mode (LED blinking)? Try again."
+    exit 1
+fi
+echo "found $found: $(bluetoothctl info "$found" | grep -m1 -E 'Name')"
+for cmd in pair trust connect; do
+    echo "-> $cmd"
+    timeout 30 bluetoothctl "$cmd" "$found" | tail -1
+done
+kill $scan 2>/dev/null
+echo
+bluetoothctl info "$found" | grep -E 'Name|Paired|Bonded|Trusted|Connected'
+sleep 2
+echo
+echo "input devices from the pen:"
+grep -H . /sys/class/input/event*/device/name 2>/dev/null | grep -i pen | sed 's#/sys/class/input/\(event[0-9]*\)/device/name:#  \1: #'
