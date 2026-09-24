@@ -478,12 +478,13 @@ Done (libcamera-sp12 4.7):
   0.17 in the corners, and full correction evens it out. Strength 0.7 (exponent on the
   gains) beat 1.0 in a blind A/B, leaving a gentle vignette and less corner noise.
   `LIBCAMERA_SOFTISP_LSC` overrides it; 0 turns it off. Type 0x21 is unused.
+  4.9 extends it to the unbinned path (raw lines shaded as they're copied), which
+  covers the rear camera: the OV13858's 2112x1188 mode is a centred 2x-binned crop of
+  its 4224x3136 array (`arraySize` in the tuning), debayered to a 1080p centre crop.
 
 Still open:
 - AWB: anchor the grey-world estimate to each module's illuminant locus (the `.aiqb`
   CCM records carry per-illuminant chromaticity/gain values).
-- Lens shading on the rear camera: the OV13858 bins in the sensor, so it takes the
-  unbinned debayer path, which has no shading stage yet.
 - GPU mode: retest when libcamera's multi-pass GPU ISP lands (the one-pass one
   aliases the IMX681 mosaic when downscaling).
 

@@ -13,7 +13,7 @@ pkgname=(
   libcamera-tools
 )
 pkgver=0.7.2
-pkgrel=4.8
+pkgrel=4.9
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 IMX681 support)"
 arch=(x86_64)
 url="https://libcamera.org/"
