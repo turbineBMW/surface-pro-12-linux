@@ -549,6 +549,19 @@ and a card tap (WPP trace of the five NfcCx GUIDs, decoded against the NfcCx sou
 in `private/nfc/nfccx`) to find the RF settings or card-detection mode the NXP
 client driver applies; then apply them from nxp-nci, RAM only.
 
+#### 8c: battery charge limit
+There's no charge limit on Linux today. The battery is reported by the Surface
+embedded controller (`surface_battery` under `MSHW0743`), whose power_supply has no
+`charge_control_*` or `charge_behaviour` attributes. Two routes:
+1. **Surface UEFI "Battery Limit":** a fixed 50% cap, applied by the firmware whatever
+   OS is running. Check whether the SP12 firmware has the option.
+2. **Windows smart charging:** trace SSAM on Windows while toggling the Surface app's
+   charging settings. The same `ssh_rtl_rx_data` / request logging as the posture
+   work should find the battery-subsystem command. Then add
+   `charge_control_end_threshold` (and `charge_behaviour` if the EC supports it) to
+   `surface_battery` in our DKMS modules, so standard tools (e.g. TLP, a
+   `power_supply` udev rule) can set it.
+
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
   ~13% CPU from boot. Include the payload layout `{source, old, new}`, the
