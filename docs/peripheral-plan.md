@@ -410,6 +410,8 @@ Findings (2026-09-24):
   udev-started `kmonad.service`/`kmonad-bt.service`).
 - ~~Slim Pen tail button~~: done (`sp12-pen-pair`, tools 1.9). A BLE bond (Just
   Works); click = Meta+F20, double click = Meta+F19, press and hold = Meta+F18.
+  XKB names F20 `XF86AudioMicMute` and F18 `XF86Launch9`, so Hyprland binds must
+  use those names; only F19 keeps its own name.
   Docking switches the pen to Windows' loosely coupled mode (radio silent): hold the
   tail button ~7 s after undocking to reconnect (automating that is Phase 8a).
 - Camera tuning (AWB/CCM/LSC) with the libcamera simple-IPA; Windows `.aiqb` files
