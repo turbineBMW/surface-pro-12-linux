@@ -381,8 +381,24 @@ Results (2026-09-23):
     sends display off/on (`0x15`/`0x16`) on console display state, D0 exit/entry
     (`0x33`/`0x34`) as "UART sleep". Linux doesn't need `0x17`: display-on at
     resume releases them all.
-- Bluetooth keyboard wake is still open (the controller woke on keyboard chatter;
-  a filtered wake would need BlueZ-side filtering).
+- **Bluetooth keyboard wake: half done (sp12-modules 1.14, wake left off in tools 1.15).**
+  - **Cause of the old "chatter" wakes:** Linux drops every link at suspend
+    (`hci_disconnect_all_sync`, "remote power off"), and the keyboard reconnects
+    within seconds (seen awake: reconnected ~12 s after a disconnect, then sent 10
+    empty reports). That reconnection wakes the host.
+  - **Connected and idle,** the keyboard sends only input and a **Battery Level
+    notification (handle 0x000e) about every 62 s** (btmon, 3 min idle).
+    HID Information flags = 0x03 (RemoteWake, NormallyConnectable).
+  - **DKMS `0026`** keeps LE links to WakeAllowed devices over suspend when the
+    controller may wake (log: "keeping 1 wake-capable link(s)"). With controller
+    wake on, the tablet then woke at 14-47 s on the battery notification.
+  - **Missing piece:** pause battery notifications (CCCD 0x000f) and/or send HID
+    Control Point Suspend (0x001e/0x0052/0x0086 = 0x00) before suspend, then undo
+    them after. BlueZ refuses both from D-Bus ("Operation Not Authorized": the HID
+    and battery services are its own) and Arch's build uses `suspend-none` (no HoG
+    suspend). Options: a BlueZ fork that does it on logind PrepareForSleep, or
+    disabling BlueZ's battery plugin and having a helper own the battery
+    notifications (Stop/StartNotify around sleep, BatteryProvider1 for UPower).
 
 ### Phase 4b: ambient light sensor and auto-brightness (done)
 `sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows
