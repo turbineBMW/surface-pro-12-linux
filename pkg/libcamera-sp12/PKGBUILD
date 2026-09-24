@@ -13,7 +13,7 @@ pkgname=(
   libcamera-tools
 )
 pkgver=0.7.2
-pkgrel=4.2
+pkgrel=4.4
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 IMX681 support)"
 arch=(x86_64)
 url="https://libcamera.org/"
@@ -43,8 +43,12 @@ source=(
   0002-libipa-camera_sensor_helper-Add-IMX681.patch
   0003-ipa-simple-Add-initial-IMX681-tuning-data.patch
   0004-ipa-simple-agc-Add-an-exposure-gain-threshold.patch
+  0005-ipa-simple-imx681-Add-colour-correction-matrices.patch
+  0006-ipa-simple-Add-OV13858-tuning-data.patch
 )
 sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
+            SKIP
+            SKIP
             SKIP
             SKIP
             SKIP

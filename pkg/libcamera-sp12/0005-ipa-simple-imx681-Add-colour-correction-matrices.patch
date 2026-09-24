@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 09:45:00 -0400
+Subject: [PATCH] ipa: simple: imx681: Add colour correction matrices
+
+Add CCMs for the Surface Pro 12 (Intel) front camera module (MSHW0740),
+taken from its Windows tuning file (imx681_MSHW0740_PTL.aiqb): the base
+matrix of each of the file's seven illuminants, 2300 K to 6859 K. The file
+also carries 24 hue-sector matrices per illuminant; the simple IPA takes
+one matrix per colour temperature. In blind A/B comparisons on real scenes
+these were preferred over no colour correction.
+
+---
+--- a/src/ipa/simple/data/imx681.yaml
++++ b/src/ipa/simple/data/imx681.yaml
+@@ -9,8 +9,39 @@
+   - BlackLevel:
+       blackLevel: 4096
+   - Awb:
+-  # A color correction matrix must be measured from a controlled chart before
+-  # enabling Ccm. The generic identity matrix is not a calibration.
++  # Colour correction matrices from the Windows tuning file for this module
++  # (imx681_MSHW0740_PTL.aiqb): the base matrix of each of its seven
++  # illuminants (the file also carries 24 hue-sector matrices per illuminant).
++  - Ccm:
++      ccms:
++        - ct: 2300
++          ccm: [  1.280,  0.195, -0.476,
++                 -0.426,  1.966, -0.540,
++                 -0.297, -1.485,  2.781 ]
++        - ct: 2586
++          ccm: [  1.345,  0.032, -0.377,
++                 -0.375,  1.952, -0.577,
++                 -0.173, -1.445,  2.618 ]
++        - ct: 2736
++          ccm: [  1.675, -0.624, -0.051,
++                 -0.450,  1.695, -0.245,
++                  0.029, -0.678,  1.649 ]
++        - ct: 3547
++          ccm: [  1.737, -0.702, -0.035,
++                 -0.363,  1.584, -0.222,
++                  0.025, -0.436,  1.411 ]
++        - ct: 4701
++          ccm: [  1.539, -0.247, -0.291,
++                 -0.267,  1.684, -0.417,
++                 -0.025, -0.495,  1.520 ]
++        - ct: 5817
++          ccm: [  1.572, -0.345, -0.227,
++                 -0.245,  1.755, -0.510,
++                 -0.018, -0.500,  1.518 ]
++        - ct: 6859
++          ccm: [  1.654, -0.425, -0.228,
++                 -0.236,  1.747, -0.511,
++                 -0.007, -0.439,  1.446 ]
+   - Adjust:
+   - Agc:
+       # Raise gain beyond 1/60 s of exposure to limit motion blur.

@@ -414,8 +414,15 @@ Findings (2026-09-24):
   use those names; only F19 keeps its own name.
   Docking switches the pen to Windows' loosely coupled mode (radio silent): hold the
   tail button ~7 s after undocking to reconnect (automating that is Phase 8a).
-- Camera tuning (AWB/CCM/LSC) with the libcamera simple-IPA; Windows `.aiqb` files
-  are the reference.
+- ~~Camera colour (CCM)~~: done (libcamera-sp12 4.4, patches `0005`/`0006`). Both
+  modules' Windows `.aiqb` files hold per-illuminant CCM records (u32 id, 4 floats,
+  u32 colour temperature, 25 3x3 float CCMs = 24 hue sectors + a base matrix) right
+  after a list of 24 hue angles; `private/camera/tuning/aiqb_ccm.py` extracts them.
+  The base matrices: front IMX681 7 illuminants (2300-6859 K), rear OV13858 6
+  (2514-6366 K). Picked over the old tuning in 3/3 blind A/B tests on real scenes;
+  30 fps unaffected. A screen-and-mirror ColorChecker fit was tried first and was
+  unreliable (AE drift, unknown panel gamut). Open: AWB (grey world, casts in mixed
+  light), lens shading, noise.
 - Optional: MS thermal devices (`MSHW0800` TSxx) if they expose useful temperatures.
 
 ### Phase 7: hardware ISP (IPU7 PSYS)

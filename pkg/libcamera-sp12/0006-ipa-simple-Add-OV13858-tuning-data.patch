@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 09:45:00 -0400
+Subject: [PATCH] ipa: simple: Add OV13858 tuning data
+
+Add a tuning file for the OV13858 as used by the Surface Pro 12 (Intel)
+rear camera module (MSHW0741), which otherwise falls back to
+uncalibrated.yaml. The colour correction matrices come from the module's
+Windows tuning file (OV13858_MSHW0741_PTL.aiqb): the base matrix of each of
+its six illuminants, 2514 K to 6366 K. In a blind A/B comparison on a real
+scene they were preferred over no colour correction. Like the IMX681 file,
+AGC raises gain beyond a 1/60 s exposure to limit motion blur.
+
+---
+diff --git a/src/ipa/simple/data/ov13858.yaml b/src/ipa/simple/data/ov13858.yaml
+new file mode 100644
+--- /dev/null
++++ b/src/ipa/simple/data/ov13858.yaml
+@@ -0,0 +1,42 @@
++# SPDX-License-Identifier: CC0-1.0
++# SPDX-FileCopyrightText: 2026 turbinebmw
++%YAML 1.1
++---
++version: 1
++algorithms:
++  - BlackLevel:
++  - Awb:
++  # Colour correction matrices from the Windows tuning file for this module
++  # (OV13858_MSHW0741_PTL.aiqb): the base matrix of each of its six
++  # illuminants (the file also carries 24 hue-sector matrices per illuminant).
++  - Ccm:
++      ccms:
++        - ct: 2514
++          ccm: [  1.677,  0.178, -0.855,
++                 -0.360,  2.045, -0.685,
++                 -0.531, -1.801,  3.332 ]
++        - ct: 2848
++          ccm: [  1.909, -0.924,  0.015,
++                 -0.271,  1.949, -0.677,
++                 -0.271, -1.335,  2.605 ]
++        - ct: 2870
++          ccm: [  1.714, -0.091, -0.623,
++                 -0.331,  1.972, -0.640,
++                 -0.392, -1.663,  3.055 ]
++        - ct: 3786
++          ccm: [  2.077, -0.916, -0.161,
++                 -0.329,  1.621, -0.293,
++                 -0.141, -0.608,  1.749 ]
++        - ct: 5438
++          ccm: [  1.926, -0.511, -0.414,
++                 -0.315,  2.028, -0.714,
++                 -0.144, -0.872,  2.016 ]
++        - ct: 6366
++          ccm: [  2.258, -1.315,  0.057,
++                 -0.232,  1.959, -0.726,
++                 -0.081, -0.381,  1.462 ]
++  - Adjust:
++  - Agc:
++      # Raise gain beyond 1/60 s of exposure to limit motion blur.
++      exposureGainThreshold: 16667
++...
+diff --git a/src/ipa/simple/data/meson.build b/src/ipa/simple/data/meson.build
+--- a/src/ipa/simple/data/meson.build
++++ b/src/ipa/simple/data/meson.build
+@@ -2,6 +2,7 @@
+ 
+ conf_files = files([
+     'imx681.yaml',
++    'ov13858.yaml',
+     'uncalibrated.yaml',
+ ])
+ 
