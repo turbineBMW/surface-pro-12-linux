@@ -327,6 +327,38 @@ pen trace if needed.
 Longer suspends, keyboard wake, `pmc_core` substate blockers, and the resume paths
 (touchpad finger-count offset seen on SP11, tablet-mode resync, camera runtime-PM).
 
+Results (2026-09-23):
+- 60 s s2idle: 98–99% hardware sleep, all in S0i2.2; RTC wake via IRQ 9.
+- Resume takes 1.5 s, 1.1 s of it `rt1320-sdca` resyncing its register cache over
+  SoundWire (synchronous, no async toggle). Optional patch: resume it async or
+  defer the sync.
+- `intel-ipu7: Failed to get runtime PM` on every resume: `ipu7_resume()` takes a
+  runtime-PM reference on PSYS, which has no driver, and returns before firmware
+  re-auth. Harmless in practice (IR, front and rear stream right after resume);
+  revisit with Phase 7.
+- Detaching the keyboard while asleep: tablet mode is correct on wake (`0007`), and
+  keyboard/touchpad devices are removed cleanly.
+- **Keyboard wake doesn't work.** SSAM wakeup (`serial0-0`) is off by default; with it
+  on, any EC event (battery updates while charging) wakes the system at once.
+  Upstream's `ssam_irq_handle()` leaves this unimplemented (TODO: fetch the pending
+  events one by one with the GPIO callback command, and only resume for wake-worthy
+  ones). Doing it needs that command's IDs, which can come from Windows' SSAM driver.
+- 28 min on battery: 99.8% hardware sleep in S0i2.2, 0.27 Wh used (~0.57 W average
+  including the awake seconds around the suspend), about 1%/h, ~4 days standby.
+- Flex Keyboard over Bluetooth (045E:0C7A, "bluez-hog-device"): libinput treated
+  the touchpad as external (no palm detection) and matched none of the Surface
+  quirks. `61-sp12-flex-touchpad.hwdb` marks it internal; `60-sp12-flex-keyboard.quirks`
+  adds the keyboard/touchpad quirks plus `ModelTabletModeNoSuspend` (internal
+  devices are otherwise suspended in tablet mode, i.e. whenever it's detached).
+  Quirks load when the compositor starts.
+- Bluetooth touchpad jagged, no acceleration: BlueZ had no connection parameters for
+  the keyboard (it never requests any), so Linux's 30-50 ms default interval
+  delivered its 125 Hz reports in bursts of ~4 (0.6 ms apart, then ~29 ms gaps) and
+  libinput's velocity went wrong. `sp12-flex-pair` now stores 7.5-11.25 ms
+  (latency 4) after pairing; `--conn-params` applies it to a paired keyboard.
+  Reports then arrive every 7.5 ms.
+- Still to do: Bluetooth keyboard wake.
+
 ### Phase 4b: ambient light sensor and auto-brightness (done)
 `sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows
 adaptive brightness is on; the probe is `windows/sp12-sensor-probe.ps1`). The

@@ -1,10 +1,11 @@
 # Surface Pro 12 (Intel) userspace: Flex Keyboard Bluetooth pairing over the
 # wired connector and reconnect on detach, the libcamera software-ISP default,
-# the IR camera wiring, and the ambient light sensor stream.
+# the IR camera wiring, the ambient light sensor stream, and Bluetooth
+# touchpad/keyboard integration for the Flex Keyboard.
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.5
+pkgver=1.8
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, IR camera wiring, ambient light stream"
 arch=('any')
@@ -32,6 +33,10 @@ package() {
 		"${pkgdir}/usr/lib/systemd/system/sp12-als.service"
 	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-als.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-als.rules"
+	install -Dm644 "$u/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb" \
+		"${pkgdir}/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb"
+	install -Dm644 "$u/usr/share/libinput/60-sp12-flex-keyboard.quirks" \
+		"${pkgdir}/usr/share/libinput/60-sp12-flex-keyboard.quirks"
 	sed 's|/usr/local/libexec/sp12-flex-bt-autoconnect|/usr/lib/sp12/sp12-flex-bt-autoconnect|' \
 		"$u/etc/systemd/system/sp12-flex-bt-connect.service" \
 		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-bt-connect.service"

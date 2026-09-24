@@ -14,15 +14,22 @@ Ported from turbineBMW/surface-pro-11-linux (sp11-flex-pair).
 
     sudo sp12-flex-pair            # pair (prompts to detach at the right moment)
     sudo sp12-flex-pair --status   # read the channel, change nothing
+    sudo sp12-flex-pair --conn-params   # only store the fast link settings
 
 On success the keyboard's address is recorded in /etc/sp12/flex-keyboard-address
-so sp12-flex-bt-connect.service can reconnect it on every detach.
+so sp12-flex-bt-connect.service can reconnect it on every detach, and BlueZ
+stores a 7.5-11.25 ms connection interval for it: the keyboard never asks for
+one, and at Linux's default 30-50 ms its 125 Hz touchpad reports arrive in
+bursts, so libinput sees jagged motion and no acceleration.
 """
 import argparse, atexit, fcntl, glob, os, re, select, socket, struct, subprocess, sys, time
 
 OOB_PID = "0C8F"
 RID_CAPABILITY, RID_HOST_BT, RID_DEVICE_BT, RID_PAIRING_KEY = 0x70, 0x56, 0x6E, 0x6F
 ADDRESS_FILE = "/etc/sp12/flex-keyboard-address"
+# LE connection parameters (interval units 1.25 ms, timeout units 10 ms).
+# Latency 4 lets the keyboard skip idle events to save its battery.
+CONN_PARAMS = {"MinInterval": 6, "MaxInterval": 9, "Latency": 4, "Timeout": 200}
 
 HCI_CHANNEL_CONTROL, HCI_DEV_NONE = 3, 0xFFFF
 MGMT_OP_ADD_REMOTE_OOB_DATA = 0x0021
@@ -116,13 +123,44 @@ def set_adapter_pairable(on):
     subprocess.run(["bluetoothctl", "pairable", "on" if on else "off"], capture_output=True)
 
 
+def set_conn_params(host, kbd):
+    """Store CONN_PARAMS in BlueZ's record for the keyboard and reconnect."""
+    info = f"/var/lib/bluetooth/{host.upper()}/{kbd.upper()}/info"
+    if not os.path.exists(info):
+        print(f"no BlueZ record at {info}; pair first")
+        return False
+    subprocess.run(["systemctl", "stop", "bluetooth"], check=True)
+    try:
+        text = open(info).read()
+        text = re.sub(r"\n\[ConnectionParameters\][^\[]*", "\n", text).rstrip("\n")
+        text += "\n\n[ConnectionParameters]\n" + "".join(
+            f"{k}={v}\n" for k, v in CONN_PARAMS.items())
+        with open(info, "w") as f:
+            f.write(text)
+    finally:
+        subprocess.run(["systemctl", "start", "bluetooth"], check=True)
+    time.sleep(2)
+    subprocess.run(["bluetoothctl", "connect", kbd], capture_output=True)
+    print("connection interval : 7.5-11.25 ms stored for the keyboard")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--status", action="store_true", help="read only, change nothing")
+    ap.add_argument("--conn-params", action="store_true",
+                    help="only store the fast connection interval for the paired keyboard")
     ap.add_argument("--wait", type=int, default=20)
     a = ap.parse_args()
     if os.geteuid() != 0:
         sys.exit("must run as root")
+
+    if a.conn_params:
+        try:
+            kbd = open(ADDRESS_FILE).read().strip()
+        except OSError:
+            sys.exit(f"no {ADDRESS_FILE}; pair the keyboard first")
+        sys.exit(0 if set_conn_params(local_addr(), kbd) else 1)
 
     node = hidraw_path()
     if not node:
@@ -205,6 +243,7 @@ def main():
         f.write(kbd + "\n")
     os.chmod(ADDRESS_FILE, 0o644)
     print(f"address recorded in {ADDRESS_FILE} for reconnect-on-detach")
+    set_conn_params(host, kbd)
 
 
 main()
