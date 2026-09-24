@@ -31,7 +31,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
 | 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency); keyboard wake and longer suspends still untested | |
-| 9 | Speaker tuning | `rt1320` | distorts at high volume, too quiet at low volume (#2144) | |
+| 9 | Speakers | `rt1320` | **Fine, not reproduced** (2026-09-24): loud and clean at 100% and at low steps with bass-heavy tracks. #2144 had reported distortion at high volume and low loudness at low volume | |
 | 10 | Slim Pen tail button | BLE | untested here | generic BT |
 | 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | unbound | Windows PEP/thermal framework. Probably ignore |
 | 12 | HECI `e362` = **Pluton**, `e35d` = **Intel ISSEI** | PCI 00:13.0, 00:18.0 | unbound | out of scope |
@@ -405,9 +405,8 @@ Findings (2026-09-24):
   settings. Don't write EEPROM blind.
 
 ### Phase 6: polish
-- Speaker tuning: UCM gain ceiling first (the SP11 method), then an EQ derived from the
-  Windows APO settings or the reference recording (PipeWire filter-chain). Look at the
-  `rt1320 R0 Calibration` controls.
+- ~~Speaker tuning~~: not needed. #2144's distortion report didn't reproduce here.
+- kmonad remaps with the Flex Keyboard over Bluetooth (personal config).
 - Slim Pen tail button: port `sp11-pen-pair`.
 - Camera tuning (AWB/CCM/LSC) with the libcamera simple-IPA; Windows `.aiqb` files
   are the reference.
