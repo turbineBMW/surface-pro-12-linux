@@ -542,6 +542,26 @@ How Windows knows the Slim Pen has left its charging cradle in the Flex Keyboard
 tracing (ETW/WPP, and KDNET if needed): record SSAM, Bluetooth and HID traffic while
 docking and undocking the pen, then find the event and map it on Linux.
 
+Linux-side passive checks (2026-09-24, cued dock/undock runs, `private/pen/hidlog.py`,
+`cues.sh`) found **no signal at all**. What was checked:
+- keyboard HID over Bluetooth (0C7A: vendor pages FFF5/FF0B) and attached (0C8B/0C8D/
+  0C8E/0C8F/0C90), plus the SSAM HID 0C97;
+- all SSAM events (`ssam_rx_event_received`);
+- the ISH HID streams and the Elan digitizer;
+- BLE advertisements: nothing from Microsoft or the pen. The pen holds no link;
+  it connects only on a tail-button press.
+
+So Windows probably *enables* the notification first: an SSAM event category, or a
+feature/output report on a keyboard collection, which Linux never sends. The
+candidates to read (copy the `.sys` from the DriverStore) are:
+- `bthlcpen.inf` (inbox Bluetooth loosely coupled pen);
+- `SurfacePenBleLcAddrAdaptationDriver`;
+- `surfaceintegrationdriver`;
+- `surface_hid_mini`.
+
+Pair that with a Windows trace (TraceLogging where the drivers use it, so it decodes
+without PDBs) of SSAM and HID I/O during docking.
+
 #### 8b: NFC card reading
 Phones work; a passive contactless card isn't detected on Linux, though Windows
 reads it easily (Phase 5). Capture Windows' NCI traffic across an NFC device restart
