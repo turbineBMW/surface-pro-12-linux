@@ -471,13 +471,19 @@ Done (libcamera-sp12 4.7):
   frame-to-frame noise at 16x gain); `64,32,5` gives 50% but leaves trails behind
   motion (no motion compensation). `LIBCAMERA_SOFTISP_TNR=0` turns it off.
 - PipeWire runs libcamera inside wireplumber: restart it after a libcamera upgrade.
+- `0009` (4.8) lens shading on the binned path, from the `.aiqb` LCMC type 0x1c
+  tables (11 or 12 illuminants x R/Gr/Gb/B x 63x47 u16 gains, 2048 = 1.0, full pixel
+  array), added to the tuning files as a `lensShading` section. The table nearest the
+  AWB white point is used. A paper flat field confirmed the tables: raw green falls to
+  0.17 in the corners, and full correction evens it out. Strength 0.7 (exponent on the
+  gains) beat 1.0 in a blind A/B, leaving a gentle vignette and less corner noise.
+  `LIBCAMERA_SOFTISP_LSC` overrides it; 0 turns it off. Type 0x21 is unused.
 
 Still open:
 - AWB: anchor the grey-world estimate to each module's illuminant locus (the `.aiqb`
   CCM records carry per-illuminant chromaticity/gain values).
-- Lens shading: now visible with the full field of view. The `.aiqb` LCMC records of
-  type 0x1c and 0x21 (260848 bytes each) hold it: 11 illuminants x 4 Bayer channels x
-  a 63x47 grid of u16 gains. The CPU ISP has no shading stage yet (a new patch).
+- Lens shading on the rear camera: the OV13858 bins in the sensor, so it takes the
+  unbinned debayer path, which has no shading stage yet.
 - GPU mode: retest when libcamera's multi-pass GPU ISP lands (the one-pass one
   aliases the IMX681 mosaic when downscaling).
 
