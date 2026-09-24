@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Battery charge limit for the Surface Pro 12 (the Surface app's "Limit to
+# 80%"), through surface_battery's charge_control_end_threshold (sp12-modules
+# 1.12 or later).
+#
+#   sp12-charge-limit            show the current and saved limit
+#   sp12-charge-limit 80         hold the battery at 80% (50-99), and keep it
+#   sp12-charge-limit off        adaptive charging (the firmware default)
+#   sp12-charge-limit --apply    apply the saved limit (run by udev at boot)
+#
+# The limit is saved in /etc/sp12/charge-limit; setting it needs root.
+set -euo pipefail
+
+conf=/etc/sp12/charge-limit
+attr=/sys/class/power_supply/BAT1/charge_control_end_threshold
+
+saved() { cat "$conf" 2>/dev/null || echo 100; }
+show() { [[ $1 -ge 100 ]] && echo "off (adaptive charging)" || echo "$1%"; }
+
+if [[ ! -e $attr ]]; then
+	echo "sp12-charge-limit: $attr not found (needs sp12-modules 1.12 or later)" >&2
+	exit 1
+fi
+
+case "${1:-}" in
+"")
+	echo "Charge limit: $(show "$(cat "$attr")") (saved: $(show "$(saved)"))"
+	exit 0
+	;;
+--apply)
+	echo "$(saved)" > "$attr"
+	exit 0
+	;;
+off | adaptive | 100) want=100 ;;
+*)
+	if [[ ! $1 =~ ^[0-9]+$ ]] || (( $1 < 50 || $1 > 100 )); then
+		echo "usage: sp12-charge-limit [50-99|off]" >&2
+		exit 2
+	fi
+	want=$1
+	;;
+esac
+
+if [[ $EUID -ne 0 ]]; then
+	exec sudo "$0" "$@"
+fi
+mkdir -p "$(dirname "$conf")"
+echo "$want" > "$conf"
+echo "$want" > "$attr"
+echo "Charge limit: $(show "$want")"

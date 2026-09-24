@@ -583,6 +583,21 @@ Driver reading (DriverStore, read-only):
   itself knows it left the charger, which may wake its radio. Hence the Bluetooth
   trace.
 
+Windows run 1 (2026-09-24):
+- **HID half failed:** my SetupDi enumeration found no devices, so the script needs
+  fixing.
+- **Bluetooth trace:** WPP undecodable without TMFs, plus my own beeps. It still
+  showed that the pen stays BLE-connected on Windows the whole time (DevicesFlowUI:
+  Slim Pen 2 connected before and after an undock), and a tail press arrives as an
+  ATT notification (handle 0x0047).
+- **User observations:** they believe the pen does disconnect eventually, and the
+  test may have moved too fast. Also, the pen had never met Windows before; Windows
+  bonded it the first time it touched the screen. That matches
+  SurfacePenBleLcAddrAdaptationDriver's `ConvertPenIDToMACAddress` / "PenService
+  queries for Auto Bonding": the digitizer reports a pen ID on contact, and Windows
+  derives the BLE address and bonds with no pairing UI. Worth tracing and porting:
+  touch-to-pair on Linux.
+
 `windows/sp12-pen-probe.ps1` reads the 0C8E features Windows has set (read only) and
 logs every 0C8E report through cued dock/undock, with Microsoft's
 `BluetoothStack.wprp` (verbose) running.
@@ -594,8 +609,27 @@ and a card tap (WPP trace of the five NfcCx GUIDs, decoded against the NfcCx sou
 in `private/nfc/nfccx`) to find the RF settings or card-detection mode the NXP
 client driver applies; then apply them from nxp-nci, RAM only.
 
-#### 8c: battery charge limit
-There's no charge limit on Linux today. The battery is reported by the Surface
+#### 8c: battery charge limit: done (sp12-modules 1.12, tools 1.11)
+`sp12-charge-limit 80` holds the battery at 80% (50-99, or `off` for adaptive). It's
+saved in `/etc/sp12/charge-limit` and applied by udev when BAT1 appears. DKMS `0024`
+adds `charge_control_end_threshold` to `surface_battery`, found from the Windows
+drivers (`SurfaceBatteryMiniport`/`SurfaceBatteryClient`) and the Surface app's
+.NET battery service (`BatteryDm.exe`):
+- **User charge mode:** BAT target command `0x0a`, 5 bytes `{u8 mode; __le32
+  threshold}`. Modes: 0 = Adaptive, 1 = UserLimit, 2 = UnlimitedWithTimeout. No
+  response, and no known read-back.
+- **Support check:** the SAM protection policy (SAM 0x01/0x01 command `0x3a`, read,
+  1 byte) has bit 0x10 BatteryChargeLimit set. Windows sets `{0x10,0x10}` with
+  `0x2f` at D0; the SP12 reads `0x10`. Other bits: 0x01 BatteryLimit (the 50% UEFI
+  limit), 0x02 ThermalOverride, 0x04 DisplayOverride, 0x08 CutTheTop.
+- **Other commands:** ProtectionStatus `0x41` (`80 09` while limiting), BPM counters
+  `0x42`/`0x43`, BAT MaxCharge `0x69` (1 while limiting), PCC enable `0x65` and
+  predictions `0x64` (adaptive), BAT `0x46` = **battery shutdown (never send)**.
+- **Test:** a limit below the current charge stops charging on AC at once;
+  adaptive resumes it within seconds. `private/battery/ssam-req.py` sends raw
+  requests via `surface_aggregator_cdev`.
+
+Original notes: there was no charge limit on Linux. The battery is reported by the Surface
 embedded controller (`surface_battery` under `MSHW0743`), whose power_supply has no
 `charge_control_*` or `charge_behaviour` attributes. Two routes:
 1. **Surface UEFI "Battery Limit":** a fixed 50% cap, applied by the firmware whatever

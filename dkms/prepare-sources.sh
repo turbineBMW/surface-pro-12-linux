@@ -40,7 +40,7 @@ arch)
 esac
 
 here=$(pwd)
-rm -rf src surface bluetooth input nfc media bridge ipu7
+rm -rf src surface bluetooth input nfc media bridge ipu7 power
 mkdir src
 if [ -f "$here/cache/$tag.tar.gz" ]; then
 	echo "prepare-sources: using cached $tag"
@@ -51,7 +51,8 @@ else
 		/drivers/input/misc/soc_button_array.c /drivers/nfc/nxp-nci/ \
 		/drivers/media/i2c/ov13858.c /drivers/media/i2c/vd55g1.c \
 		/drivers/media/i2c/Kconfig /drivers/media/i2c/Makefile \
-		/drivers/media/pci/intel/ipu-bridge.c /drivers/staging/media/ipu7/
+		/drivers/media/pci/intel/ipu-bridge.c /drivers/staging/media/ipu7/ \
+		/drivers/power/supply/surface_battery.c
 	fetched=
 	for repo in $repos; do
 		echo "prepare-sources: fetching $tag from $repo"
@@ -117,4 +118,9 @@ intel-ipu7-isys-objs += ipu7-isys.o ipu7-isys-csi2.o ipu7-isys-csi-phy.o \
 	ipu7-fw-isys.o ipu7-isys-video.o ipu7-isys-queue.o ipu7-isys-subdev.o
 obj-m += intel-ipu7-isys.o
 KB
+
+# Battery charge limit.
+mkdir power
+cp src/drivers/power/supply/surface_battery.c power/
+echo 'obj-m += surface_battery.o' > power/Kbuild
 rm -rf src
