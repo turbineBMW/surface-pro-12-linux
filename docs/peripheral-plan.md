@@ -381,7 +381,22 @@ Results (2026-09-23):
     sends display off/on (`0x15`/`0x16`) on console display state, D0 exit/entry
     (`0x33`/`0x34`) as "UART sleep". Linux doesn't need `0x17`: display-on at
     resume releases them all.
-- **Bluetooth keyboard wake: half done (sp12-modules 1.14, wake left off in tools 1.15).**
+- **Bluetooth keyboard wake: done (2026-09-24, sp12-modules 1.14, bluez-sp12 5.87-2.3,
+  tools 1.16).** A 5-min hands-off sleep with the keyboard connected saw no traffic
+  (RTC wake). A spacebar press woke it at once (report `00 2c`).
+  - **bluez-sp12** (`pkg/bluez-sp12`, Arch's PKGBUILD + patch `0001`):
+    - `src/sleep.c` watches logind PrepareForSleep and holds a 300 ms delay
+      inhibitor.
+    - HoG (`suspend-sleep` replaces `suspend-none`) writes HID Control Point
+      Suspend/Exit to every HID instance. The first version segfaulted on bonded,
+      unconnected HoG devices (the pen): NULL `dev->hog` in a path that never ran
+      upstream.
+    - It pauses vendor-page input reports (report map walk; the keyboard's
+      `0xd1` status report on page 0xFFF5 ignores HID Suspend and woke it at ~60 s).
+    - The battery plugin unregisters Battery Level notifications.
+    - Everything is restored on resume.
+  - Earlier findings below.
+- **Bluetooth keyboard wake (history): half done (sp12-modules 1.14, wake left off in tools 1.15).**
   - **Cause of the old "chatter" wakes:** Linux drops every link at suspend
     (`hci_disconnect_all_sync`, "remote power off"), and the keyboard reconnects
     within seconds (seen awake: reconnected ~12 s after a disconnect, then sent 10

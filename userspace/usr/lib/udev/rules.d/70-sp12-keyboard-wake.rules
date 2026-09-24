@@ -7,7 +7,10 @@ ACTION=="add|bind", SUBSYSTEM=="serial", ATTR{modalias}=="acpi:MSHW0084:*", \
   TEST=="power/wakeup", ATTR{power/wakeup}="enabled"
 
 
-# Bluetooth wake stays off for now: sp12-modules 1.14 would keep the keyboard's
-# link up over suspend, but the keyboard sends a battery-level notification about
-# every minute, which wakes the system. Enabling it needs those paused over
-# suspend (BlueZ-side), see docs/peripheral-plan.md Phase 4.
+
+# Bluetooth: sp12-modules 1.14 keeps links to WakeAllowed devices (the paired
+# keyboard) up over suspend, and bluez-sp12 (5.87-2.3) sends HID Suspend and
+# pauses the keyboard's battery and vendor status notifications for the sleep,
+# so only a key report wakes it.
+ACTION=="add|bind", SUBSYSTEM=="pci", DRIVER=="btintel_pcie", \
+  TEST=="power/wakeup", ATTR{power/wakeup}="enabled"

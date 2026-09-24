@@ -12,6 +12,7 @@ pkg/*/pkg/
 pkg/limine/Limine/
 pkg/limine-arch/
 pkg/libcamera-sp12/libcamera/
+pkg/bluez-sp12/bluez/
 pkg/*/*.tar.gz
 pkg/*/build.log
 pkg/out/
