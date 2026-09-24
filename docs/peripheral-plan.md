@@ -400,6 +400,9 @@ Findings (2026-09-24):
   trace of real traffic would show.
 - Tools: `private/nfc/pn560-nci.py` (raw NCI over I²C, driver unbound),
   `private/nfc/nfc-poll.py` (kernel netlink poll), `windows/sp12-nfc-probe.ps1`.
+- `sp12-nfc-probe.ps1` now also enables NfcCx's five WPP GUIDs and its TraceLogging
+  provider (`6E6BACF6-...`) by GUID. The NCI hex dumps are WPP, so the packets must
+  be pulled out of the raw event data (no TMF).
 - Next for cards: capture Windows' traffic (WPP trace of the five NfcCx GUIDs across
   a device restart and a card tap), or compare NXP's published PN7160/PN560 RF
   settings. Don't write EEPROM blind.
@@ -561,6 +564,28 @@ candidates to read (copy the `.sys` from the DriverStore) are:
 
 Pair that with a Windows trace (TraceLogging where the drivers use it, so it decodes
 without PDBs) of SSAM and HID I/O during docking.
+
+Driver reading (DriverStore, read-only):
+- **Charger hotkey:** `SurfacePenWirelessChargerHotkey.inf` binds
+  `HID\VID_045E&PID_0C8E&Col01` (keyboard page), the "Surface Wireless Pen Charger
+  Hotkey". Its descriptor carries F18/F19/F20, i.e. tail-button presses passed through
+  the charger.
+- **Collection 2** (FFF4:0x0A) has input report `0x14`: 6 bytes (probably the pen's
+  BD_ADDR), three flag bits and a 0-100 value (battery). That's the pen status.
+- **Collection 3** (FFF4:0x01) looks like a pairing channel: `0x54`/`0x6e` in,
+  `0x55`/`0x6f` out (8- and 16-byte key-sized fields), and features `0x56`, `0x70`
+  (bits 0x10, 0x22) and `0x73`.
+- **`SurfacePenBleLcAddrAdaptationDriver`:** PenService sets
+  `FEATURE_REPORT_ID_HOST_AB_CAPABILITY` ("host auto-bonding capability") on the
+  "SeparatePenCharger" and the digitizer. It's likely the enable that makes the
+  charger report.
+- **User's observation:** a faint haptic pulse from the pen on lift-out, so the pen
+  itself knows it left the charger, which may wake its radio. Hence the Bluetooth
+  trace.
+
+`windows/sp12-pen-probe.ps1` reads the 0C8E features Windows has set (read only) and
+logs every 0C8E report through cued dock/undock, with Microsoft's
+`BluetoothStack.wprp` (verbose) running.
 
 #### 8b: NFC card reading
 Phones work; a passive contactless card isn't detected on Linux, though Windows

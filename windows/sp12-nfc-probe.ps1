@@ -111,6 +111,13 @@ if ($isAdmin) {
   New-Item -ItemType Directory -Force -Path $traceDir | Out-Null
   $providers = (logman query providers) | Where-Object { $_ -match 'NFC|Nfc|Proximity|SmartCard|Smartcard|SCard|Nxp|NXP' } |
     ForEach-Object { ($_ -split '\s{2,}')[0].Trim() } | Where-Object { $_ } | Sort-Object -Unique
+  # NfcCx's WPP control GUIDs (NCI packets are hex-dumped here) and its
+  # TraceLogging provider, from microsoft/NFC-Class-Extension-Driver. WPP
+  # providers aren't listed by name, so enable them by GUID.
+  $nfccx = '{696D4914-12A4-422C-A09E-E7E0EB25806A}', '{351734B9-8706-4CEE-9247-04ACCD448C76}',
+           '{4EB7CC58-145C-4A79-9418-68CD290DD9D4}', '{9D97CB90-8DEE-42B8-B553-D1816BE6FB9E}',
+           '{D976D933-B88B-4227-95F8-00513C0986DE}', '{6E6BACF6-5635-4670-BEDF-93F55A822F4B}'
+  $providers = @($nfccx) + @($providers)
   $providers | Set-Content (Join-Path $traceDir 'providers.txt') -Encoding UTF8
   logman stop $session -ets 2>$null | Out-Null
   $first = $true
