@@ -27,7 +27,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
 | 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0016`, libcamera 0.7.2-4.2). Open: colour tuning, noise (soft ISP has no NR) | new `imx681` |
 | 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | **Works** (`0017`–`0022`): GREY 644×604 on `/dev/video8`, emitter strobes alternate frames; irlume next | `vd55g1` + VD55G0 |
-| 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Powers up and polls (`0006`); a credit card isn't detected** | RF config next |
+| 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works for phones** (`0006`, stock nxp-nci core). A contactless card isn't detected (Windows reads it): RF tuning, Phase 8 | stock nxp-nci + `0006` |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
 | 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency); keyboard wake and longer suspends still untested | |
@@ -374,11 +374,35 @@ AOSP-style controller lives in the local `turbinebmw.monitor` plugin: user offse
 a lux curve, log-lux bands with debounce, a minimum brightness delta, slow ramps.
 No human presence sensor exists (Windows lists none).
 
-### Phase 5: NFC RF
-The PN560 powers up and polls but doesn't detect a credit card. Decode Windows'
-`CustomEEPROMConfigBlob` (NXP proprietary set-config tags, starting `A0 11 …`) and
-send it after `CORE_INIT` from a userspace tool, RAM only first (no EEPROM write
-until it's proven). Then decide whether it belongs in `nxp-nci`.
+### Phase 5: NFC (done for phones; card reading moved to Phase 8)
+Findings (2026-09-24):
+- **Phones work** with the stock nxp-nci core plus `0006`: a Galaxy Z Fold8 (Samsung
+  Wallet, HCE) is detected on every tap as ISO14443-A (random `08:xx` UID).
+- **A contactless credit card is never detected on Linux**, while Windows reads it
+  easily. Phones answer strongly; passive cards need proper field strength and
+  receiver settings, so this points at RF tuning or low-power card detection.
+- Windows' `CustomEEPROMConfigBlob` is three NXP TLVs (A011, A068, A00B). The chip
+  already holds all three byte-for-byte (read back with `CORE_GET_CONFIG`), since
+  Windows writes them to EEPROM. Windows' runtime `RfConfigData` is empty.
+- The PN560 is NCI 2.0 (firmware info `1f ca 01 01 40`). `CORE_SET_POWER_SUB_STATE`
+  looked necessary once but isn't: the stock driver detects the phone without it
+  (a draft patch for it was dropped). NfcCx only sends it with a secure element or
+  HCE present.
+- The antenna is at the top left of the screen (front), range ~15 mm. Windows
+  detects cards through the proximity path (the smart-card reader state stays empty).
+- Upstream nxp-nci deadlocks if the driver is removed while the device is up
+  (`nxp_nci_remove` holds `info_lock`, and `nci_unregister_device` →
+  `nxp_nci_close` takes it again). Take the device down before `rmmod`.
+- Windows' NFC class extension is open source (microsoft/NFC-Class-Extension-Driver,
+  cloned in `private/nfc/nfccx`). Its NCI library logs through WPP GUID
+  `696D4914-12A4-422C-A09E-E7E0EB25806A`, with hex dumps of config values. The NXP
+  client driver can inject vendor commands at NfcCx sequence points, which only a
+  trace of real traffic would show.
+- Tools: `private/nfc/pn560-nci.py` (raw NCI over I²C, driver unbound),
+  `private/nfc/nfc-poll.py` (kernel netlink poll), `windows/sp12-nfc-probe.ps1`.
+- Next for cards: capture Windows' traffic (WPP trace of the five NfcCx GUIDs across
+  a device restart and a card tap), or compare NXP's published PN7160/PN560 RF
+  settings. Don't write EEPROM blind.
 
 ### Phase 6: polish
 - Speaker tuning: UCM gain ceiling first (the SP11 method), then an EQ derived from the
@@ -397,6 +421,13 @@ currently uses only ISYS plus libcamera's software ISP, which has no noise reduc
 or colour matrix. Research Intel's out-of-tree IPU7 PSYS driver and camera HAL
 (closed components) on Arch: what exists, how it coexists with PipeWire/libcamera,
 and whether our DKMS/package approach can carry it.
+
+### Phase 8: NFC card reading (last)
+Phones work; a passive contactless card isn't detected on Linux, though Windows
+reads it easily (Phase 5). Capture Windows' NCI traffic across an NFC device restart
+and a card tap (WPP trace of the five NfcCx GUIDs, decoded against the NfcCx source
+in `private/nfc/nfccx`) to find the RF settings or card-detection mode the NXP
+client driver applies; then apply them from nxp-nci, RAM only.
 
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
