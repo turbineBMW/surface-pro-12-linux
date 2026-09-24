@@ -8,7 +8,11 @@
 #   sp12-charge-limit off        adaptive charging (the firmware default)
 #   sp12-charge-limit --apply    apply the saved limit (run by udev at boot)
 #
-# The limit is saved in /etc/sp12/charge-limit; setting it needs root.
+# The limit is saved in /etc/sp12/charge-limit; setting it needs root. For the
+# usual 80% on/off, UPower's charge limit (the omarchy power panel, or
+# EnableChargeThreshold) is simpler: no password, and UPower restores it at
+# boot. Use this for other values; without a saved file, --apply does nothing,
+# leaving the limit to UPower.
 set -euo pipefail
 
 conf=/etc/sp12/charge-limit
@@ -28,7 +32,7 @@ case "${1:-}" in
 	exit 0
 	;;
 --apply)
-	echo "$(saved)" > "$attr"
+	[[ -f $conf ]] && echo "$(saved)" > "$attr"
 	exit 0
 	;;
 off | adaptive | 100) want=100 ;;
