@@ -1,12 +1,12 @@
-# Flex Keyboard Bluetooth pairing over the wired connector and reconnect on
-# detach, plus the libcamera software-ISP default, for the Surface Pro 12
-# (Intel).
+# Surface Pro 12 (Intel) userspace: Flex Keyboard Bluetooth pairing over the
+# wired connector and reconnect on detach, the libcamera software-ISP default,
+# the IR camera wiring, and the ambient light sensor stream.
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.4
+pkgver=1.5
 pkgrel=1
-pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, IR camera wiring"
+pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, IR camera wiring, ambient light stream"
 arch=('any')
 license=('MIT')
 options=('!debug')
@@ -27,6 +27,11 @@ package() {
 		"${pkgdir}/usr/lib/systemd/system/sp12-ir-camera.service"
 	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-ir-camera.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-ir-camera.rules"
+	install -Dm755 "$u/usr/lib/sp12/sp12-als" "${pkgdir}/usr/lib/sp12/sp12-als"
+	install -Dm644 "$u/usr/lib/systemd/system/sp12-als.service" \
+		"${pkgdir}/usr/lib/systemd/system/sp12-als.service"
+	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-als.rules" \
+		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-als.rules"
 	sed 's|/usr/local/libexec/sp12-flex-bt-autoconnect|/usr/lib/sp12/sp12-flex-bt-autoconnect|' \
 		"$u/etc/systemd/system/sp12-flex-bt-connect.service" \
 		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-bt-connect.service"

@@ -13,7 +13,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 |---|---|---|
 | Touchscreen + pen | `MSHW0744` → `i2c_hid_acpi`, Elan `04F3:4505`, `hid-multitouch` | **I²C-HID, not SPI.** SP11's HID-over-SPI / iptsd stack does not apply |
 | Speakers + mic | SOF PTL, SoundWire link 3, `rt1320-sdca`, generic SDCA function topologies | "No SoundWire machine driver found": works via the default fallback. Tuning is open (see Phase 6) |
-| Sensors | ISH + `IshS_SI.bin` → accel/gyro/magn/ALS/orientation IIO | via `install-ish-firmware.sh` |
+| Sensors | ISH + `IshS_SI.bin` → accel/gyro/magn/orientation IIO | via `install-ish-firmware.sh`. ALS enumerates but stalls, see #13 |
 | Wi-Fi / BT | CNVi `iwlwifi` / `btintel_pcie` | |
 | Keyboard, touchpad, battery, AC, fan, profiles, POS, lid wake, Flex BT | SSAM, `dkms/` | |
 | Backlight | `intel_backlight` | |
@@ -35,6 +35,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 10 | Slim Pen tail button | BLE | untested here | generic BT |
 | 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | unbound | Windows PEP/thermal framework. Probably ignore |
 | 12 | HECI `e362` = **Pluton**, `e35d` = **Intel ISSEI** | PCI 00:13.0, 00:18.0 | unbound | out of scope |
+| 13 | Ambient light sensor (ISH virtual sensor, "INTEL / Model 0") | ISH `HID-SENSOR-200041` | **Works when streamed** (`sp12-als`, tools 1.5 → `/run/sp12-als/lux`). The one-shot read (`in_illuminance_raw`) returns a stale cached report, so sysfs polling and iio-sensor-proxy (whose 0.5 s buffer probe times out; the sensor reports every 0.75 s) see 0. Insensitive, as in Windows: TV-lit room 0 lux, overhead light 1–20, flashlight to ~2800. Reads 4006 K / x 0.380 / y 0.376 when too dark for colour | `hid-sensor-als`: correct |
 | — | Limine `protocol: linux` | — | still freezes after handoff | tracked in `docs/limine.md` |
 
 ## What SP11 gives us
@@ -325,6 +326,13 @@ pen trace if needed.
 ### Phase 4: suspend quality
 Longer suspends, keyboard wake, `pmc_core` substate blockers, and the resume paths
 (touchpad finger-count offset seen on SP11, tablet-mode resync, camera runtime-PM).
+
+### Phase 4b: ambient light sensor and auto-brightness (done)
+`sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows
+adaptive brightness is on; the probe is `windows/sp12-sensor-probe.ps1`). The
+AOSP-style controller lives in the local `turbinebmw.monitor` plugin: user offset on
+a lux curve, log-lux bands with debounce, a minimum brightness delta, slow ramps.
+No human presence sensor exists (Windows lists none).
 
 ### Phase 5: NFC RF
 The PN560 powers up and polls but doesn't detect a credit card. Decode Windows'
