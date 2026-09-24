@@ -357,7 +357,15 @@ Results (2026-09-23):
   libinput's velocity went wrong. `sp12-flex-pair` now stores 7.5-11.25 ms
   (latency 4) after pairing; `--conn-params` applies it to a paired keyboard.
   Reports then arrive every 7.5 ms.
-- Still to do: Bluetooth keyboard wake.
+- Bluetooth keyboard wake (detached): the controller (`0000:00:14.7`) has wakeup off
+  by default. With it on and BlueZ's suspend scan raised to 30 ms every 160 ms
+  (`ScanWindowSuspend=48`, `ScanIntervalSuspend=256`), a key press woke it at once,
+  but so did the keyboard's own chatter 6 s into an untouched suspend. BlueZ logged
+  "wake event 0x1" (unexpected event), not a remote wake, for both. Reverted: keys
+  on the detached keyboard don't wake it; the power button does.
+- Next candidate: filtered wake. Wake briefly, check the event, go back to sleep
+  unless it's a key press. It's needed for the attached keyboard (SSAM, above) and
+  would make Bluetooth wake usable too.
 
 ### Phase 4b: ambient light sensor and auto-brightness (done)
 `sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows
