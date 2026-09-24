@@ -33,7 +33,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency); keyboard wake and longer suspends still untested | |
 | 9 | Speakers | `rt1320` | **Fine, not reproduced** (2026-09-24): loud and clean at 100% and at low steps with bass-heavy tracks. #2144 had reported distortion at high volume and low loudness at low volume | |
 | 10 | Slim Pen tail button | BLE | **Works** (`sp12-pen-pair`): Meta+F20 / F19 / F18 for click / double click / hold | bluez |
-| 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | unbound | Windows PEP/thermal framework. Probably ignore |
+| 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | Temperatures **work** via `surface_temp` (hwmon `surface_thermal`: RTS1–6, VTS1–4); the ACPI devices themselves stay unbound | Windows PEP/thermal framework |
 | 12 | HECI `e362` = **Pluton**, `e35d` = **Intel ISSEI** | PCI 00:13.0, 00:18.0 | unbound | out of scope |
 | 13 | Ambient light sensor (ISH virtual sensor, "INTEL / Model 0") | ISH `HID-SENSOR-200041` | **Works when streamed** (`sp12-als`, tools 1.5 → `/run/sp12-als/lux`). The one-shot read (`in_illuminance_raw`) returns a stale cached report, so sysfs polling and iio-sensor-proxy (whose 0.5 s buffer probe times out; the sensor reports every 0.75 s) see 0. Insensitive, as in Windows: TV-lit room 0 lux, overhead light 1–20, flashlight to ~2800. Reads 4006 K / x 0.380 / y 0.376 when too dark for colour | `hid-sensor-als`: correct |
 | — | Limine `protocol: linux` | — | still freezes after handoff | tracked in `docs/limine.md` |
@@ -423,7 +423,10 @@ Findings (2026-09-24):
   30 fps unaffected. A screen-and-mirror ColorChecker fit was tried first and was
   unreliable (AE drift, unknown panel gamut). Open: AWB (grey world, casts in mixed
   light), lens shading, noise.
-- Optional: MS thermal devices (`MSHW0800` TSxx) if they expose useful temperatures.
+- ~~MS thermal devices (`MSHW0800` TSxx)~~: already work. They're the EC's ten
+  temperature sensors (RTS1-6 thermistors, VTS1-4 computed), which `surface_temp`
+  reads over SSAM as hwmon `surface_thermal`. The ACPI devices are Windows'
+  descriptions of the same sensors.
 
 ### Phase 7: hardware ISP (IPU7 PSYS)
 Windows' image quality comes from IPU7's hardware ISP (PSYS): denoise, CCM, AWB and
