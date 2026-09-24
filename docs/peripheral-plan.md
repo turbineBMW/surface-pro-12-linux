@@ -415,12 +415,15 @@ Findings (2026-09-24):
   Docking switches the pen to Windows' loosely coupled mode (radio silent): hold the
   tail button ~7 s after undocking to reconnect (automating that is Phase 8a).
 - ~~Camera colour (CCM)~~: done (libcamera-sp12 4.4, patches `0005`/`0006`). Both
-  modules' Windows `.aiqb` files hold per-illuminant CCM records (u32 id, 4 floats,
-  u32 colour temperature, 25 3x3 float CCMs = 24 hue sectors + a base matrix) right
-  after a list of 24 hue angles; `private/camera/tuning/aiqb_ccm.py` extracts them.
-  The base matrices: front IMX681 7 illuminants (2300-6859 K), rear OV13858 6
-  (2514-6366 K). Picked over the old tuning in 3/3 blind A/B tests on real scenes;
-  30 fps unaffected. A screen-and-mirror ColorChecker fit was tried first and was
+  modules' Windows `.aiqb` files are CPFF containers (sections LCMC/LAIQ/LISP/LTHR,
+  records `{u32 size, u16 id, u16 type}`; the parser in
+  github.com/MarcoGlauser/galaxybook6-ultra-camera walks them). LCMC record type 25
+  holds the CCMs: per illuminant a 924-byte block of 4 chromaticity floats, u32 colour
+  temperature, the base (global) 3x3 matrix, then 24 hue-sector matrices;
+  `private/camera/tuning/aiqb_ccm.py` extracts them. Front IMX681: 7 illuminants
+  (2300-6859 K); rear OV13858: 6 (2514-6366 K). 4.4 first shipped the 24th
+  (red/magenta) sector matrix by mistake; 4.6 uses the base matrices, preferred in a
+  blind A/B, which also amplify blue noise less (2.1x vs 2.6x). 30 fps unaffected. A screen-and-mirror ColorChecker fit was tried first and was
   unreliable (AE drift, unknown panel gamut). Open: AWB (grey world, casts in mixed
   light), lens shading, noise.
 - ~~MS thermal devices (`MSHW0800` TSxx)~~: already work. They're the EC's ten
@@ -458,12 +461,33 @@ Findings (2026-09-24), hardware ISP not viable for now:
   Meanwhile improve the software ISP (Phase 7B).
 
 ### Phase 7B: software ISP from the Windows tuning
+Done (libcamera-sp12 4.7):
+- `0007` 2x2 binning in the CPU debayer. The soft ISP couldn't scale, so 1080p from
+  the IMX681 (no binned sensor mode) was a centre crop at full per-pixel noise. It
+  now bins a 3840x2160 window to 1920x1080: Windows' field of view, finer and
+  quieter noise, a quarter of the work. The OV13858 already had a binned sensor mode.
+- `0008` temporal noise reduction on the binned path: per-pixel running average in
+  the raw domain, reset above a noise threshold. Default `64,24,3` (about 40% less
+  frame-to-frame noise at 16x gain); `64,32,5` gives 50% but leaves trails behind
+  motion (no motion compensation). `LIBCAMERA_SOFTISP_TNR=0` turns it off.
+- PipeWire runs libcamera inside wireplumber: restart it after a libcamera upgrade.
+
+Still open:
 - AWB: anchor the grey-world estimate to each module's illuminant locus (the `.aiqb`
   CCM records carry per-illuminant chromaticity/gain values).
-- Lens shading: find the LSC tables in the `.aiqb` and check what libcamera's software
-  ISP can apply.
+- Lens shading: now visible with the full field of view. The `.aiqb` LCMC records of
+  type 0x1c and 0x21 (260848 bytes each) hold it: 11 illuminants x 4 Bayer channels x
+  a 63x47 grid of u16 gains. The CPU ISP has no shading stage yet (a new patch).
 - GPU mode: retest when libcamera's multi-pass GPU ISP lands (the one-pass one
   aliases the IMX681 mosaic when downscaling).
+
+### Phase 7C: NPU/GPU video denoise
+The software TNR has no motion compensation, hence the trails at higher strength.
+Phone-style quality needs either motion-compensated multi-frame merging (optical
+flow on the GPU) or a learned video denoiser (FastDVDnet-like). Panther Lake has an
+NPU and an Xe GPU that OpenVINO can use on Linux. Scope: a real-time 1080p30
+model/pipeline between libcamera and apps (v4l2loopback or a PipeWire filter), its
+power cost, and how apps pick it up.
 
 ### Phase 8: last items
 #### 8a: pen cradle detection
