@@ -481,10 +481,17 @@ Done (libcamera-sp12 4.7):
   4.9 extends it to the unbinned path (raw lines shaded as they're copied), which
   covers the rear camera: the OV13858's 2112x1188 mode is a centred 2x-binned crop of
   its 4224x3136 array (`arraySize` in the tuning), debayered to a 1080p centre crop.
+- `0010` (4.10) AWB from grey zones and the illuminant locus. The CCM records' first
+  four floats are the sensor white point (R/G, B/G) and the illuminant's CIE xy at
+  that CCT, which gives each module's locus. The soft ISP stats gain a 16x12 zone
+  grid. The AWB averages the lit, unsaturated zones within 0.1 of the locus
+  (brightness-weighted), then snaps the estimate onto the locus, keeping up to 0.06
+  off it. Room LED light measured ~0.046 green of the IMX681 locus, and 0.03 left a
+  green cast. The CCT for the CCM comes from the locus. Blind A/B: this fixed the
+  rear's cyan whites (warm floor/cardboard had fooled grey world); the front was a tie.
+- The PKGBUILD applied `../000*.patch`; patches from 0010 on need `00[0-9][0-9]-*`.
 
 Still open:
-- AWB: anchor the grey-world estimate to each module's illuminant locus (the `.aiqb`
-  CCM records carry per-illuminant chromaticity/gain values).
 - GPU mode: retest when libcamera's multi-pass GPU ISP lands (the one-pass one
   aliases the IMX681 mosaic when downscaling).
 

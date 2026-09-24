@@ -13,7 +13,7 @@ pkgname=(
   libcamera-tools
 )
 pkgver=0.7.2
-pkgrel=4.9
+pkgrel=4.10
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 IMX681 support)"
 arch=(x86_64)
 url="https://libcamera.org/"
@@ -48,8 +48,10 @@ source=(
   0007-libcamera-software_isp-debayer_cpu-Add-2x2-binning.patch
   0008-libcamera-software_isp-debayer_cpu-Add-temporal-noise-reduction.patch
   0009-libcamera-software_isp-Add-lens-shading-correction.patch
+  0010-ipa-simple-awb-Use-grey-zones-and-the-illuminant-locus.patch
 )
 sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
+            SKIP
             SKIP
             SKIP
             SKIP
@@ -74,7 +76,7 @@ _pick() {
 prepare() {
   cd $pkgbase
   local p
-  for p in ../000*.patch; do
+  for p in ../00[0-9][0-9]-*.patch; do
     patch -Np1 < "$p"
   done
 
