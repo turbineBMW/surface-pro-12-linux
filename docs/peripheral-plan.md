@@ -689,8 +689,38 @@ Windows run 2 (2026-09-24, probe v2, raw HCI via BTHPORT all keywords →
     the connect miss the pen's short advertising burst.
 - Windows keeps working because it's the same bond. Re-pairing on either side
   changes the keys, so the import has to be run again.
-- **Open:** charge status while docked (the pen stays connected until it idles);
-  touch-to-pair on a fresh Linux install without Windows.
+- **Open:** touch-to-pair on a fresh Linux install without Windows.
+
+**Charge status (2026-09-24).** The OSD is a local shell plugin (`turbinebmw.pen`):
+- It shows a pen battery bar when the pen connects.
+- It shows "Pen charging" when the Battery Level rises during a connection.
+
+On Linux, the docked pen stays connected for only about 25 s. It sends nothing while
+docked and then disconnects itself (reason 0x13). It sometimes reconnects on its own
+when pulled out soon afterwards.
+
+Driver reading (SurfacePenBleLcAddrAdaptationDriver and the Loosely-Coupled code in
+`Microsoft.Bluetooth.Service.dll`):
+- **Charger pen status:** the charger's report 0x14 carries the pen address (usage
+  2), bits 0x08/0x0D/0x0E and battery 0x0C.
+  - Windows only reads it. No host write enables it.
+  - On Linux it never arrives, and nothing shows at the SSAM level either.
+  - A get-feature request for 0x14 times out, and `surface_hid` can't fetch input
+    reports.
+- **Host auto-bonding setup:** feature 0x70 bit 0 (usage 0x10) is the host
+  capability. Bit 1 (usage 0x22) is set by the device.
+  - Windows writes `70 01`, then `56 <host BD_ADDR, LSB first> <flag: usage 0x09>`.
+  - Sending the same from Linux enabled nothing visible.
+- **FHID:** feature 0x73 is copied from the charger to the digitizer. The SP12
+  charger returns `ffff` (unsupported).
+- **Pen address from the pen ID (reports 0x54/0x6E):**
+  - `h` = first 8 bytes of SHA1(`f876af012e1c2840918f6f605e6b1fd6` || PenID,
+    big-endian), read as a little-endian integer.
+  - The address is `((h ^ hostAddr) & 0x3FFFFFFFFFFF) | 0xC00000000000` when the
+    device is auto-bonding capable (usage 0x12), else `(~h & …) | 0xC0…`.
+  - Output 0x55 carries an 8-byte "Security Key" for the pen.
+  - This is the start of touch-to-pair. The LTK/IRK derivation isn't traced yet.
+  - `ioctl_adaptation_cmd` is `0x9C402401`.
 
 `windows/sp12-pen-probe.ps1` reads the 0C8E features Windows has set (read only) and
 logs every 0C8E report through cued dock/undock, with Microsoft's
