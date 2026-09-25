@@ -765,6 +765,25 @@ embedded controller (`surface_battery` under `MSHW0743`), whose power_supply has
    `surface_battery` in our DKMS modules, so standard tools (e.g. TLP, a
    `power_supply` udev rule) can set it.
 
+#### 8d: OLED PSR2 without the pulse
+With xe's default PSR2 (selective update, selective fetch), the OLED pulses faintly on a
+mostly still screen, and Windows doesn't. A live A/B via debugfs `i915_edp_psr_debug`
+(1 = off, 3 = force PSR1) removed it.
+- `psr_safest_params=1` doesn't keep PSR2: with the safest wake lines it doesn't fit,
+  and the driver falls back to PSR1.
+- **Shipped:** tools 1.20 `/usr/lib/modprobe.d/sp12-display.conf` sets
+  `xe enable_psr=1` (PSR1).
+- **Panel:** eDP 1.5 with PSR2 (DPCD 0x070 = 03). Brightness goes through Intel's
+  HDR AUX interface in nits (0x344 = 0x90); the TCON has an optimization capability
+  that isn't enabled.
+
+To do:
+- Find out whether Windows runs PSR2 on this panel and with what parameters.
+- Tune PSR2 (wake lines, SU granularity, early transport, IO/fast wake) with drm
+  debug on.
+- Report it to the xe/PTL display maintainers if there's a panel quirk to add. The
+  gain is the extra idle power of PSR2 over PSR1.
+
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
   ~13% CPU from boot. Include the payload layout `{source, old, new}`, the
