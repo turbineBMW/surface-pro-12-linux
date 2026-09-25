@@ -646,6 +646,31 @@ Windows run 1 (2026-09-24):
   derives the BLE address and bonds with no pairing UI. Worth tracing and porting:
   touch-to-pair on Linux.
 
+Windows run 2 (2026-09-24, probe v2, raw HCI via BTHPORT all keywords →
+`private/pen/hcixml2snoop.py` → btsnoop):
+- **Cradle:** the pen stays BLE-connected while docked until it idles or the host
+  suspends. It doesn't reconnect when pulled out; any button press does,
+  performing the action at once (eraser click → OneNote). The HCI log shows an
+  advertisement from a resolvable private address (5D:F..), a connection within
+  13 ms, encryption with the stored key, then the HID report. That's an ordinary
+  bonded reconnect, which Linux already does (sp12-pen-pair). **Cradle detection
+  is therefore not a Bluetooth event.** The charger's 0C8E report 0x14 is still
+  unobserved (the keyboard was on Bluetooth in this run).
+- **Touch-to-pair (pen removed, tip touched):**
+  - The first radio traffic comes ~4 s after the touch, and it's already a bonded
+    connection. Windows adds the pen's static random address (C6:12:34:56:78:9A;
+    Linux's bond uses D2:AB:CD:EF:01:23, so each host has its own identity) to the
+    accept list, connects as central, and starts encryption with an LTK it
+    already has. **No SMP pairing.** Then plain GATT discovery.
+  - Windows logs LE Start Encryption without parameters, so the key isn't in the
+    trace.
+  - So the digitizer supplies a pen ID on contact (the Linux digitizer descriptor
+    has usage 0x5B Transducer Serial Number), and Windows derives the address and
+    keys (LTK, and an IRK for the RPA) from it.
+  - SurfacePenBleLcAddrAdaptationDriver has `ConvertPenIDToMACAddress` and
+    BCrypt; the key derivation may be there or in the inbox bthlcpen/BthLE stack.
+  - Porting it to Linux = reverse-engineering that derivation, then writing a
+    BlueZ bond on touch.
 `windows/sp12-pen-probe.ps1` reads the 0C8E features Windows has set (read only) and
 logs every 0C8E report through cued dock/undock, with Microsoft's
 `BluetoothStack.wprp` (verbose) running.
