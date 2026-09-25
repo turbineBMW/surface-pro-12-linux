@@ -7,7 +7,7 @@
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.19
+pkgver=1.20
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream"
 arch=('any')
