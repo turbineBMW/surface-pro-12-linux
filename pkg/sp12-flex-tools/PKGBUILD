@@ -2,12 +2,12 @@
 # wired connector, reconnect on detach and Bluetooth touchpad/keyboard
 # integration; Slim Pen pairing and Windows bond import; the libcamera software-ISP default and the
 # front camera field-of-view switch; the battery charge limit; keyboard wake;
-# the IR
+# the OLED PSR1 setting; the IR
 # camera wiring; and the ambient light sensor stream.
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.17
+pkgver=1.18
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream"
 arch=('any')
@@ -43,6 +43,8 @@ package() {
 		"${pkgdir}/usr/lib/systemd/system/sp12-als.service"
 	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-als.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-als.rules"
+	install -Dm644 "$u/usr/lib/modprobe.d/sp12-display.conf" \
+		"${pkgdir}/usr/lib/modprobe.d/sp12-display.conf"
 	install -Dm644 "$u/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb" \
 		"${pkgdir}/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb"
 	install -Dm644 "$u/usr/share/libinput/60-sp12-flex-keyboard.quirks" \
