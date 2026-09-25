@@ -14,6 +14,10 @@ Pen (Phase 8a) - keyboard ATTACHED; follow the prompts and beeps:
   C:\Users\turbi\sp12\sp12-pen-probe.ps1 -Mode cradle
       cued dock/undock (high beep = pen IN, low beep = pen OUT)
 
+Bluetooth pairing keys (pen "loosely coupled" bond for Linux) - pen paired in
+Windows (touch it to the screen once); exports to out\bt-keys.reg (keep private):
+  C:\Users\turbi\sp12\sp12-bt-keys.ps1
+
 NFC card (Phase 8b) - restarts the NFC device, then asks for card taps:
   C:\Users\turbi\sp12\sp12-nfc-probe.ps1
 
