@@ -2,12 +2,12 @@
 # wired connector, reconnect on detach and Bluetooth touchpad/keyboard
 # integration; Slim Pen pairing and Windows bond import; the libcamera software-ISP default and the
 # front camera field-of-view switch; the battery charge limit; keyboard wake;
-# the OLED PSR1 setting; the IR
+# the OLED PSR setting; the IR
 # camera wiring; and the ambient light sensor stream.
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.18
+pkgver=1.19
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream"
 arch=('any')
