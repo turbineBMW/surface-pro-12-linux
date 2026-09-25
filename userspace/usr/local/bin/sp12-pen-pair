@@ -10,10 +10,11 @@
 # and Meta+F18 (press and hold) -- Microsoft's Win+F18/F19/F20 contract. Bind
 # them in the compositor.
 #
-# Windows never bonds the pen (it uses a "loosely coupled" scheme), so this
-# bond is Linux-only and Windows keeps working. Docking the pen in the keyboard
-# switches it to that loosely coupled mode, where its radio is silent: after
-# undocking, hold the tail button ~7 s and the existing bond reconnects.
+# This bond is Linux-only and Windows keeps working. Docking the pen in the
+# keyboard switches it to its "loosely coupled" identity, the one Windows
+# bonds when the pen first touches the screen; this bond then needs the ~7 s
+# hold to reconnect. For Windows behaviour (any click reconnects and runs the
+# action), import the Windows bond with sp12-bt-import-windows.
 set -u
 WAIT=120
 [ "${1:-}" = --wait ] && WAIT=$2

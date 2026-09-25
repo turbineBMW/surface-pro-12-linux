@@ -1,13 +1,13 @@
 # Surface Pro 12 (Intel) userspace: Flex Keyboard Bluetooth pairing over the
 # wired connector, reconnect on detach and Bluetooth touchpad/keyboard
-# integration; Slim Pen pairing; the libcamera software-ISP default and the
+# integration; Slim Pen pairing and Windows bond import; the libcamera software-ISP default and the
 # front camera field-of-view switch; the battery charge limit; keyboard wake;
 # the IR
 # camera wiring; and the ambient light sensor stream.
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.16
+pkgver=1.17
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream"
 arch=('any')
@@ -20,6 +20,7 @@ package() {
 	local u="${startdir}/../../userspace"
 	install -Dm755 "$u/usr/local/bin/sp12-flex-pair" "${pkgdir}/usr/bin/sp12-flex-pair"
 	install -Dm755 "$u/usr/local/bin/sp12-pen-pair" "${pkgdir}/usr/bin/sp12-pen-pair"
+	install -Dm755 "$u/usr/local/bin/sp12-bt-import-windows" "${pkgdir}/usr/bin/sp12-bt-import-windows"
 	install -Dm755 "$u/usr/local/bin/sp12-camera-fov" "${pkgdir}/usr/bin/sp12-camera-fov"
 	install -Dm755 "$u/usr/local/bin/sp12-charge-limit" "${pkgdir}/usr/bin/sp12-charge-limit"
 	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-charge-limit.rules" \

@@ -671,6 +671,27 @@ Windows run 2 (2026-09-24, probe v2, raw HCI via BTHPORT all keywords →
     BCrypt; the key derivation may be there or in the inbox bthlcpen/BthLE stack.
   - Porting it to Linux = reverse-engineering that derivation, then writing a
     BlueZ bond on touch.
+
+**Click-to-connect: done (tools 1.17).** Skip the derivation: share Windows' bond.
+- `windows/sp12-bt-keys.ps1` exports BTHPORT's `Keys` (a one-shot SYSTEM task) to
+  `out\bt-keys.reg`. Keep it private.
+- `sp12-bt-import-windows bt-keys.reg C6:12:34:56:78:9A --like D2:AB:CD:EF:01:23`
+  writes the BlueZ bond. Conversions: LTK as stored, IRK reversed, ERand a
+  little-endian u64. It copies the name, services and GATT cache from the Linux bond.
+  The two identities expose the same GATT table.
+- **Result (2026-09-24):** after docking or idling, one eraser click connects in
+  ~25 ms. The link comes up with the resolved RPA and AES-CCM from the imported
+  key, and the click's report arrives about 0.6 s later.
+  - With the GATT cache, the uhid device is up before the report arrives, so the
+    action fires (a Hyprland screenshot). As on Windows, there's no 7 s hold.
+  - Without the cache, BlueZ's first discovery takes ~5 s and the click is dropped.
+  - A BlueZ discovery scan running at the time (the Bluetooth panel open) makes
+    the connect miss the pen's short advertising burst.
+- Windows keeps working because it's the same bond. Re-pairing on either side
+  changes the keys, so the import has to be run again.
+- **Open:** charge status while docked (the pen stays connected until it idles);
+  touch-to-pair on a fresh Linux install without Windows.
+
 `windows/sp12-pen-probe.ps1` reads the 0C8E features Windows has set (read only) and
 logs every 0C8E report through cued dock/undock, with Microsoft's
 `BluetoothStack.wprp` (verbose) running.
