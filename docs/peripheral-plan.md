@@ -27,7 +27,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
 | 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0016`, libcamera 0.7.2-4.2). Open: colour tuning, noise (soft ISP has no NR) | new `imx681` |
 | 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | **Works** (`0017`–`0022`): GREY 644×604 on `/dev/video8`, emitter strobes alternate frames; irlume next | `vd55g1` + VD55G0 |
-| 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works for phones** (`0006`, stock nxp-nci core). A contactless card isn't detected (Windows reads it): RF tuning, Phase 8 | stock nxp-nci + `0006` |
+| 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works** (`0006`, stock nxp-nci core): phones, and contactless cards when polling includes a listen phase (initiator + NFC-DEP target, as Windows does). Reader-only polling misses cards (8b) | stock nxp-nci + `0006` |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
 | 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency); keyboard wake and longer suspends still untested | |
@@ -726,12 +726,38 @@ Driver reading (SurfacePenBleLcAddrAdaptationDriver and the Loosely-Coupled code
 logs every 0C8E report through cued dock/undock, with Microsoft's
 `BluetoothStack.wprp` (verbose) running.
 
-#### 8b: NFC card reading
-Phones work; a passive contactless card isn't detected on Linux, though Windows
-reads it easily (Phase 5). Capture Windows' NCI traffic across an NFC device restart
-and a card tap (WPP trace of the five NfcCx GUIDs, decoded against the NfcCx source
-in `private/nfc/nfccx`) to find the RF settings or card-detection mode the NXP
-client driver applies; then apply them from nxp-nci, RAM only.
+#### 8b: NFC card reading: solved (2026-09-25), no kernel change
+Phones worked, but a passive contactless card wasn't detected on Linux, though
+Windows reads it easily (Phase 5).
+
+**Cause:** the PN560 misses passive cards when discovery is reader-only. The kernel's
+`RF_DISCOVER` for all reader protocols is `21 03 09 04 00 01 01 01 02 01 06 01`
+(NFC-A/B/F/V poll). Windows adds NFC-A/F listen (`80`, `82`) and an NXP proprietary
+mode (`70`).
+- With the listen modes, the stock nxp-nci/nci stack reads the card (ISO14443-A,
+  sens_res 4400, sel_res 20).
+- The kernel adds those listen modes when START_POLL also asks for NFC-DEP target
+  mode (`NFC_ATTR_TM_PROTOCOLS`). That's neard's "Dual" poll mode;
+  `private/nfc/nfc-poll.py --tm` does it too.
+- Likely mechanism: without a listen phase, the idle part of each discovery cycle
+  uses low-power card detection, which a phone trips and a card doesn't. Unverified.
+
+**Windows capture:** `out/nfc/nci-spb.csv`, from SPB class-extension ETW
+`{72cd9ff7-...}` event 1023. It gives the full startup and two card activations.
+
+**Bisected over raw I²C** (`pn560-nci.py --windows --drop ...`, logs
+`private/nfc/probe-9..13`):
+- Windows' extras aren't needed: `2F 02`, `A112=01` (it persists: reads 01 before
+  any write), `2F 21`, `TOTAL_DURATION` 500 ms, and its discover map.
+- A keep-configuration `CORE_RESET` looked needed after one run without it. The
+  stock reset-configuration core then read the card with listen modes, so that run
+  was a missed tap. A draft nxp-nci setup-hook patch was dropped
+  (`private/nfc/0027-...`).
+- Only the poll list mattered. The kernel's list missed the card; with the listen
+  modes added, it was read.
+
+**Open:** an upstream note for PN560/PN7160 (reader-only discovery misses passive
+cards). A userspace consumer (neard isn't installed) must poll in dual mode.
 
 #### 8c: battery charge limit: done (sp12-modules 1.12, tools 1.11)
 `sp12-charge-limit 80` holds the battery at 80% (50-99, or `off` for adaptive). It's
