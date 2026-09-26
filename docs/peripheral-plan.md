@@ -836,6 +836,14 @@ mostly still screen, and Windows doesn't. A live A/B via debugfs `i915_edp_psr_d
   and the driver falls back to PSR1.
 - **Shipped:** tools 1.20 `/usr/lib/modprobe.d/sp12-display.conf` sets
   `xe enable_psr=1` (PSR1).
+- **Back to PSR2 (tools 1.22, 2026-09-26):** the pulse is faint and only shows
+  sometimes, so the driver default is kept to find the conditions that bring it out.
+  The `options` line in `sp12-display.conf` is commented out (uncomment it for PSR1).
+  Installing 1.21 hadn't rebuilt the UKI (pacman's mkinitcpio hook doesn't watch
+  `modprobe.d`), so the next boot still ran the old settings; 1.22 adds
+  `90-sp12-display-initramfs.hook` to rebuild it on changes to the conf.
+- **Windows' sink config live (0x170 = 0x65, CRC verification):** no visible difference
+  on a boot where the pulse showed. Turning it on set sink 0x2006 = 01 (link CRC error).
 - **Panel:** eDP 1.5 with PSR2 (DPCD 0x070 = 03). Brightness goes through Intel's
   HDR AUX interface in nits (0x344 = 0x90); the TCON has an optimization capability
   that isn't enabled.

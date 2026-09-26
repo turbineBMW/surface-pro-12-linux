@@ -8,7 +8,7 @@
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.21
+pkgver=1.22
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream, NFC reader"
 arch=('any')
@@ -56,6 +56,8 @@ package() {
 		"${pkgdir}/usr/share/sp12/omarchy/plugins/sp12.nfc/Service.qml"
 	install -Dm644 "$u/usr/lib/modprobe.d/sp12-display.conf" \
 		"${pkgdir}/usr/lib/modprobe.d/sp12-display.conf"
+	install -Dm644 "$u/usr/share/libalpm/hooks/90-sp12-display-initramfs.hook" \
+		"${pkgdir}/usr/share/libalpm/hooks/90-sp12-display-initramfs.hook"
 	install -Dm644 "$u/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb" \
 		"${pkgdir}/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb"
 	install -Dm644 "$u/usr/share/libinput/60-sp12-flex-keyboard.quirks" \
