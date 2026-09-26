@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Pro 12 ambient light sensor stream (/run/sp12-als/lux)
+# iio-sensor-proxy's startup probe toggles the ALS buffer; let it finish first.
+After=iio-sensor-proxy.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/sp12/sp12-als
+RuntimeDirectory=sp12-als
+RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=2

@@ -1,0 +1,4 @@
+# Surface Pro 12 (Intel): when IPU7's ISYS capture node for CSI2 port 1 (the
+# IR camera) appears, wire the graph and give it a stable name.
+SUBSYSTEM=="video4linux", KERNEL=="video*", ATTR{name}=="Intel IPU7 ISYS Capture 8", \
+  SYMLINK+="sp12-ir", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sp12-ir-camera.service"

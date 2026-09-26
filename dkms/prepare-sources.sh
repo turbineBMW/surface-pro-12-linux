@@ -40,14 +40,19 @@ arch)
 esac
 
 here=$(pwd)
-rm -rf src surface bluetooth
+rm -rf src surface bluetooth input nfc media bridge ipu7 power
 mkdir src
 if [ -f "$here/cache/$tag.tar.gz" ]; then
 	echo "prepare-sources: using cached $tag"
 	tar -xzf "$here/cache/$tag.tar.gz" -C src
 else
 	git -C src init -q
-	git -C src sparse-checkout set --no-cone /drivers/platform/surface/ /net/bluetooth/
+	git -C src sparse-checkout set --no-cone /drivers/platform/surface/ /net/bluetooth/ \
+		/drivers/input/misc/soc_button_array.c /drivers/nfc/nxp-nci/ \
+		/drivers/media/i2c/ov13858.c /drivers/media/i2c/vd55g1.c \
+		/drivers/media/i2c/Kconfig /drivers/media/i2c/Makefile \
+		/drivers/media/pci/intel/ipu-bridge.c /drivers/staging/media/ipu7/ \
+		/drivers/power/supply/surface_battery.c /drivers/power/supply/surface_charger.c
 	fetched=
 	for repo in $repos; do
 		echo "prepare-sources: fetching $tag from $repo"
@@ -87,4 +92,35 @@ KB
 # Build only bluetooth.ko; rfcomm, bnep, hidp and 6lowpan stay stock.
 cp -r src/net/bluetooth bluetooth
 grep -vE '^obj-\$\(CONFIG_BT_(RFCOMM|BNEP|HIDP|6LOWPAN)\)' bluetooth/Makefile > bluetooth/Kbuild
+
+mkdir input
+cp src/drivers/input/misc/soc_button_array.c input/
+echo 'obj-m += soc_button_array.o' > input/Kbuild
+
+# Build only nxp-nci_i2c.ko; the nxp-nci core stays stock.
+mkdir nfc
+cp src/drivers/nfc/nxp-nci/i2c.c src/drivers/nfc/nxp-nci/nxp-nci.h nfc/
+printf 'obj-m += nxp-nci_i2c.o\nnxp-nci_i2c-objs := i2c.o\n' > nfc/Kbuild
+
+# Cameras: ov13858 (patched), imx681 (new), vd55g1 (VD55G0 IR) and ipu-bridge.
+mkdir media bridge
+cp src/drivers/media/i2c/ov13858.c src/drivers/media/i2c/imx681.c \
+   src/drivers/media/i2c/vd55g1.c src/drivers/media/i2c/vd55g0-win.h media/
+echo 'obj-m += ov13858.o imx681.o vd55g1.o' > media/Kbuild
+cp src/drivers/media/pci/intel/ipu-bridge.c bridge/
+echo 'obj-m += ipu-bridge.o' > bridge/Kbuild
+
+# IPU7 ISYS (snooped frame writes); intel-ipu7 itself stays stock.
+cp -r src/drivers/staging/media/ipu7 ipu7
+rm -f ipu7/Makefile ipu7/Kconfig
+cat > ipu7/Kbuild <<'KB'
+intel-ipu7-isys-objs += ipu7-isys.o ipu7-isys-csi2.o ipu7-isys-csi-phy.o \
+	ipu7-fw-isys.o ipu7-isys-video.o ipu7-isys-queue.o ipu7-isys-subdev.o
+obj-m += intel-ipu7-isys.o
+KB
+
+# Battery charge limit; battery events off over suspend (keyboard wake).
+mkdir power
+cp src/drivers/power/supply/surface_battery.c src/drivers/power/supply/surface_charger.c power/
+echo 'obj-m += surface_battery.o surface_charger.o' > power/Kbuild
 rm -rf src

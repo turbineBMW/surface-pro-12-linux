@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Choose the front camera's field of view for 1080p and smaller outputs:
+#
+#   crop  the centre of the sensor at full resolution (default)
+#   wide  the whole sensor, 2x2 binned: Windows' field of view, finer noise
+#
+#   sp12-camera-fov [crop|wide|toggle]
+#
+# With no argument, prints the current setting. libcamera-sp12's soft ISP reads
+# fov= from $XDG_CONFIG_HOME/sp12/camera.conf whenever a camera starts, so the
+# change applies the next time an app opens the camera. LIBCAMERA_SOFTISP_FOV
+# in the environment overrides the file.
+set -euo pipefail
+
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/sp12/camera.conf"
+
+current() {
+	local v
+	v=$(sed -n 's/^[[:space:]]*fov[[:space:]]*=[[:space:]]*\([a-z]*\).*/\1/p' "$conf" 2>/dev/null | tail -n1 || true)
+	[[ $v == wide ]] && echo wide || echo crop
+}
+
+case "${1:-}" in
+"")
+	current
+	exit 0
+	;;
+crop | wide) want=$1 ;;
+toggle) [[ $(current) == wide ]] && want=crop || want=wide ;;
+*)
+	echo "usage: sp12-camera-fov [crop|wide|toggle]" >&2
+	exit 2
+	;;
+esac
+
+mkdir -p "$(dirname "$conf")"
+if [[ -f $conf ]] && grep -q '^[[:space:]]*fov[[:space:]]*=' "$conf"; then
+	sed -i "s/^[[:space:]]*fov[[:space:]]*=.*/fov=$want/" "$conf"
+else
+	echo "fov=$want" >>"$conf"
+fi
+echo "Front camera field of view: $want (applies the next time an app opens the camera)"

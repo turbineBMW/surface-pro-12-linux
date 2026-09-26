@@ -1,0 +1,73 @@
+Subject: nfc: nxp-nci: support the Surface Pro 12 (Intel) PN560
+
+The Surface Pro 12 (Intel) has an NXP PN560 at I2C address 0x28 on I2C4,
+described as ACPI 1FC93002 (\_SB.PC00.I2C4.NFC1). Its _CRS lists GpioInt
+followed by two GpioIo, but unlike the NXP reference layout neither is a
+firmware-download line: SsdtNfc's wake path raises GpioIo 0 (pad
+0x001A1011) 12 ms before GpioIo 1 (pad 0x001A040F), and its sleep path
+drops them in reverse, so the first is a supply enable and the second is
+VEN. With the default mapping the driver pulls the supply low as the
+"firmware" GPIO and the chip NAKs every I2C transfer (-EREMOTEIO).
+
+Give the PN560 its own mapping: VEN as "enable", and the supply as an
+optional "power" GPIO held high while the driver is bound.
+---
+--- a/drivers/nfc/nxp-nci/i2c.c
++++ b/drivers/nfc/nxp-nci/i2c.c
+@@ -272,10 +272,25 @@ static const struct acpi_gpio_mapping acpi_nxp_nci_gpios[] = {
+ 	{ }
+ };
+ 
++/*
++ * The Surface Pro 12 (Intel) PN560 has no firmware-download line in _CRS:
++ * the first GpioIo is a supply enable that must stay high, the second is VEN.
++ * Its ACPI power sequencing brings the supply up before VEN.
++ */
++static const struct acpi_gpio_params pn560_power_gpios = { 1, 0, false };
++
++static const struct acpi_gpio_mapping acpi_nxp_nci_pn560_gpios[] = {
++	{ "enable-gpios", &enable_gpios, 1 },
++	{ "power-gpios", &pn560_power_gpios, 1 },
++	{ }
++};
++
+ static int nxp_nci_i2c_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
++	const struct acpi_gpio_mapping *gpios;
+ 	struct nxp_nci_i2c_phy *phy;
++	struct gpio_desc *gpiod_power;
+ 	unsigned long irqflags;
+ 	int r;
+ 
+@@ -292,7 +307,8 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
+ 	phy->i2c_dev = client;
+ 	i2c_set_clientdata(client, phy);
+ 
+-	r = devm_acpi_dev_add_driver_gpios(dev, acpi_nxp_nci_gpios);
++	gpios = device_get_match_data(dev) ?: acpi_nxp_nci_gpios;
++	r = devm_acpi_dev_add_driver_gpios(dev, gpios);
+ 	if (r)
+ 		dev_dbg(dev, "Unable to add GPIO mapping table\n");
+ 
+@@ -308,6 +324,12 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
+ 		return PTR_ERR(phy->gpiod_fw);
+ 	}
+ 
++	gpiod_power = devm_gpiod_get_optional(dev, "power", GPIOD_OUT_HIGH);
++	if (IS_ERR(gpiod_power)) {
++		nfc_err(dev, "Failed to get power gpio\n");
++		return PTR_ERR(gpiod_power);
++	}
++
+ 	r = nxp_nci_probe(phy, &client->dev, &i2c_phy_ops,
+ 			  NXP_NCI_I2C_MAX_PAYLOAD, &phy->ndev);
+ 	if (r < 0)
+@@ -365,6 +387,7 @@ static const struct acpi_device_id acpi_id[] = {
+ 	{ "NXP1001" },
+ 	{ "NXP1002" },
+ 	{ "NXP7471" },
++	{ "1FC93002", (kernel_ulong_t)acpi_nxp_nci_pn560_gpios },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(acpi, acpi_id);

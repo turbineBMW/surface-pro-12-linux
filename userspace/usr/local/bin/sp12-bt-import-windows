@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Import Bluetooth LE bonds from a Windows key export into BlueZ, so a device
+paired in Windows also works in Linux on the same controller (dual boot).
+
+    sp12-bt-import-windows bt-keys.reg [ADDRESS ...] [--like LINUX-ADDRESS] [--force]
+
+bt-keys.reg comes from windows/sp12-bt-keys.ps1 (HKLM\\...\\BTHPORT\\Parameters\\
+Keys, exported as SYSTEM). With no ADDRESS, every LE bond in it is listed and
+nothing is written. Run as root; restart bluetooth afterwards.
+
+Main use: the Surface Slim Pen's "loosely coupled" bond. Windows creates it when
+the pen first touches the screen, and the pen uses that identity whenever it
+has been docked in the keyboard. Linux then reconnects it on any button press
+instead of needing a 7 s hold into pairing mode.
+
+Conversions (as in other dual-boot tools): LTK as stored, IRK byte-reversed,
+ERand a little-endian u64, EDIV a u32; the key size is KeyLength.
+
+BlueZ only auto-connects a bonded LE device (lets the kernel watch for its
+advertising) once it knows the device's services, e.g. HID. --like names a
+Linux bond of the same device (the pen paired with sp12-pen-pair under its
+other identity): its name, services, device ID and cached GATT table are
+copied. The cached table matters for the pen: without it BlueZ spends ~5 s on
+service discovery after the first reconnect and the click that woke the pen
+is dropped. For the pen:
+
+    sp12-bt-import-windows bt-keys.reg C6:12:34:56:78:9A --like D2:AB:CD:EF:01:23
+"""
+import configparser, os, re, shutil, sys
+
+argv = sys.argv[1:]
+like = None
+if '--like' in argv:
+    i = argv.index('--like')
+    like = argv[i + 1].upper()
+    del argv[i:i + 2]
+args = [a for a in argv if not a.startswith('--')]
+force = '--force' in argv
+if not args:
+    sys.exit(__doc__)
+
+raw = open(args[0], 'rb').read()
+text = raw.decode('utf-16' if raw[:2] in (b'\xff\xfe', b'\xfe\xff') else 'utf-8')
+text = re.sub(r'\\\r?\n\s*', '', text)
+
+bonds = {}		# (adapter, device) -> {name: bytes|int}
+key = None
+for line in text.splitlines():
+    m = re.match(r'\[.*\\Keys\\([0-9a-f]{12})\\([0-9a-f]{12})\]$', line.strip(), re.I)
+    if m:
+        key = (m.group(1).lower(), m.group(2).lower())
+        bonds[key] = {}
+        continue
+    if line.startswith('['):
+        key = None
+        continue
+    m = re.match(r'"([^"]+)"=(dword|hex(?:\(b\))?):(.*)$', line.strip())
+    if key and m:
+        name, kind, val = m.groups()
+        if kind == 'dword':
+            bonds[key][name] = int(val, 16)
+        else:
+            bonds[key][name] = bytes.fromhex(val.replace(',', ''))
+
+
+def colon(h):
+    return ':'.join(h[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
+le = {k: v for k, v in bonds.items() if 'LTK' in v}
+wanted = {a.replace(':', '').lower() for a in args[1:]}
+if not wanted:
+    for (ad, dev), v in le.items():
+        print(f"{colon(dev)}  adapter {colon(ad)}  keys: {', '.join(sorted(v))}")
+    sys.exit(0)
+
+for (ad, dev), v in le.items():
+    if dev not in wanted:
+        continue
+    path = f"/var/lib/bluetooth/{colon(ad)}/{colon(dev)}"
+    info = os.path.join(path, 'info')
+    if os.path.exists(info) and not force:
+        print(f"{colon(dev)}: {info} exists (use --force to replace)")
+        continue
+
+    cfg = configparser.ConfigParser(interpolation=None)
+    cfg.optionxform = str
+    adapter_dir = f"/var/lib/bluetooth/{colon(ad)}"
+    ocfg = configparser.ConfigParser(interpolation=None)
+    ocfg.optionxform = str
+    if like:
+        oinfo = os.path.join(adapter_dir, like, 'info')
+        if not ocfg.read(oinfo):
+            sys.exit(f"--like: no bond at {oinfo}")
+
+    cfg['General'] = {
+        'Name': ocfg.get('General', 'Name', fallback=colon(dev)),
+        'AddressType': 'static' if v.get('AddressType', 1) else 'public',
+        'SupportedTechnologies': 'LE;',
+        'Trusted': 'true',
+        'Blocked': 'false',
+        'WakeAllowed': 'true',
+    }
+    for k in ('Appearance', 'Services'):
+        if ocfg.has_option('General', k):
+            cfg['General'][k] = ocfg['General'][k]
+    if ocfg.has_section('DeviceID'):
+        cfg['DeviceID'] = dict(ocfg['DeviceID'])
+    if 'IRK' in v:
+        cfg['IdentityResolvingKey'] = {'Key': v['IRK'][::-1].hex().upper()}
+    cfg['LongTermKey'] = {
+        'Key': v['LTK'].hex().upper(),
+        'Authenticated': '1' if v.get('AuthReq', 0) & 0x04 else '0',
+        'EncSize': str(v.get('KeyLength', 16)),
+        'EDiv': str(v.get('EDIV', 0)),
+        'Rand': str(int.from_bytes(v.get('ERand', b'\0' * 8), 'little')),
+    }
+    if like:
+        src = os.path.join(adapter_dir, 'cache', like)
+        dst = os.path.join(adapter_dir, 'cache', colon(dev))
+        if os.path.isfile(src) and (force or not os.path.exists(dst)):
+            shutil.copyfile(src, dst)
+            os.chmod(dst, 0o600)
+        print(f"{colon(dev)}: name, services and GATT cache copied from {like}")
+    elif 'Services' not in cfg['General']:
+        print(f"{colon(dev)}: no --like bond, so no services: BlueZ won't auto-connect it")
+
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    with open(info, 'w') as f:
+        cfg.write(f, space_around_delimiters=False)
+    os.chmod(info, 0o600)
+    print(f"{colon(dev)}: bond written to {info}")

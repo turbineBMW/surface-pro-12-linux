@@ -1,0 +1,45 @@
+Subject: media: i2c: vd55g1: support 8-bit output on the VD55G0
+
+The VD55G0 mode table (applied verbatim from the Windows driver) leaves
+the power-on RAW10 output. When the pad format is Y8_1X8, program
+FORMAT_CTRL and OIF_IMG_CTRL for RAW8 after the table, as on the VD55G1.
+The firmware accepts it (tested on the Surface Pro 12 Intel, 644x604).
+---
+--- a/drivers/media/i2c/vd55g1.c
++++ b/drivers/media/i2c/vd55g1.c
+@@ -1200,7 +1200,7 @@ static void vd55g1_grab_ctrls(struct vd55g1 *sensor, bool enable)
+  * VD55G0: apply the Windows camx configuration verbatim (clock tree, MIPI
+  * rate, geometry, firmware AE) and start streaming with the camx handshake.
+  */
+-static int vd55g0_enable_streams(struct vd55g1 *sensor)
++static int vd55g0_enable_streams(struct vd55g1 *sensor, u32 code)
+ {
+ 	unsigned int i;
+ 	int ret;
+@@ -1214,6 +1214,17 @@ static int vd55g0_enable_streams(struct vd55g1 *sensor)
+ 		vd55g1_write(sensor, CCI_REG8(vd55g0_win_config[i].addr),
+ 			     vd55g0_win_config[i].val, &ret);
+ 
++	/*
++	 * The Windows table leaves the power-on RAW10 output; 8-bit output
++	 * (for consumers that want GREY) is selected as on the VD55G1.
++	 */
++	if (code == MEDIA_BUS_FMT_Y8_1X8) {
++		vd55g1_write(sensor, VD55G1_REG_FORMAT_CTRL,
++			     vd55g1_get_fmt_bpp(code), &ret);
++		vd55g1_write(sensor, VD55G1_REG_OIF_IMG_CTRL,
++			     vd55g1_get_fmt_data_type(code), &ret);
++	}
++
+ 	/* Apply the current V4L2 exposure/gain control values */
+ 	vd55g1_write(sensor, VD55G0_REG_COARSE_EXPOSURE,
+ 		     sensor->expo_ctrl->val, &ret);
+@@ -1279,7 +1290,7 @@ static int vd55g1_enable_streams(struct v4l2_subdev *sd,
+ 	int ret;
+ 
+ 	if (sensor->id == VD55G1_MODEL_ID_VD55G0)
+-		return vd55g0_enable_streams(sensor);
++		return vd55g0_enable_streams(sensor, format->code);
+ 
+ 	ret = pm_runtime_resume_and_get(sensor->dev);
+ 	if (ret < 0)

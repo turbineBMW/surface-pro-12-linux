@@ -1,0 +1,2 @@
+# Surface Pro 12 (Intel): stream the ISH ambient light sensor once it appears.
+SUBSYSTEM=="iio", ATTR{name}=="als", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sp12-als.service"

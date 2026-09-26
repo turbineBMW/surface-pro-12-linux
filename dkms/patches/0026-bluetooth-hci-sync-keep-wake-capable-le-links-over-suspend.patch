@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 19:00:00 -0400
+Subject: [PATCH] Bluetooth: hci_sync: Keep wake-capable LE links over suspend
+
+On suspend, every connection is dropped ("remote power off") and the
+controller is set up to wake the host on advertising from devices allowed
+to wake it. A Bluetooth keyboard such as the Surface Pro Flex Keyboard
+reconnects as soon as it is disconnected, so that reconnection wakes the
+host seconds into every suspend: key wake is unusable.
+
+Connected and idle, the keyboard is silent; it only sends reports on
+input. So when the controller may wake the host, keep LE links to devices
+flagged HCI_CONN_FLAG_REMOTE_WAKEUP (WakeAllowed) and disconnect the rest
+as before. A key press then arrives over the kept link and wakes the host.
+---
+--- a/net/bluetooth/hci_sync.c
++++ b/net/bluetooth/hci_sync.c
+@@ -6023,6 +6023,50 @@
+ 	return 0;
+ }
+ 
++/* An LE link to a device allowed to wake the host, e.g. a keyboard. */
++static bool hci_conn_wakes_host(struct hci_dev *hdev, struct hci_conn *conn)
++{
++	struct hci_conn_params *params;
++
++	if (conn->type != LE_LINK || conn->state != BT_CONNECTED)
++		return false;
++
++	params = hci_conn_params_lookup(hdev, &conn->dst, conn->dst_type);
++	return params && (params->flags & HCI_CONN_FLAG_REMOTE_WAKEUP);
++}
++
++/*
++ * Disconnect everything for suspend except, when the controller may wake the
++ * host, links to devices allowed to wake it. A keyboard that is disconnected
++ * reconnects at once, and that reconnection wakes the host; kept connected,
++ * it is silent until a key is pressed, whose report then wakes the host.
++ */
++static int hci_suspend_disconnect_sync(struct hci_dev *hdev, u8 reason, bool keep_wake)
++{
++	struct hci_conn *conn;
++
++again:
++	hci_dev_lock(hdev);
++	list_for_each_entry(conn, &hdev->conn_hash.list, list) {
++		if (keep_wake && hci_conn_wakes_host(hdev, conn))
++			continue;
++
++		/* Make sure the connection is not freed while unlocking */
++		conn = hci_conn_get(conn);
++		hci_dev_unlock(hdev);
++		hci_abort_conn_sync(hdev, conn, reason);
++		hci_conn_put(conn);
++		goto again;
++	}
++	hci_dev_unlock(hdev);
++
++	if (keep_wake && hci_conn_count(hdev))
++		bt_dev_info(hdev, "keeping %u wake-capable link(s) over suspend",
++			    hci_conn_count(hdev));
++
++	return 0;
++}
++
+ /* This function perform power off HCI command sequence as follows:
+  *
+  * Clear Advertising
+@@ -6517,8 +6561,11 @@
+ 	hci_pause_scan_sync(hdev);
+ 
+ 	if (hci_conn_count(hdev)) {
+-		/* Soft disconnect everything (power off) */
+-		err = hci_disconnect_all_sync(hdev, HCI_ERROR_REMOTE_POWER_OFF);
++		/* Soft disconnect everything (power off), but keep links to
++		 * devices allowed to wake the host when it may be woken.
++		 */
++		err = hci_suspend_disconnect_sync(hdev, HCI_ERROR_REMOTE_POWER_OFF,
++						  hdev->wakeup && hdev->wakeup(hdev));
+ 		if (err) {
+ 			/* Set state to BT_RUNNING so resume doesn't notify */
+ 			hdev->suspend_state = BT_RUNNING;
+-- 
+2.53.0

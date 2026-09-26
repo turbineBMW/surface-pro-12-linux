@@ -1,0 +1,13 @@
+[Unit]
+Description=Surface Pro 12 NFC reader (/run/sp12-nfc/events)
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/sp12/sp12-nfc
+RuntimeDirectory=sp12-nfc
+RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=2
+# Stop polling and take the device down before the module could be removed.
+KillSignal=SIGTERM
+TimeoutStopSec=10

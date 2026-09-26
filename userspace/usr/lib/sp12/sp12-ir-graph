@@ -1,0 +1,33 @@
+#!/bin/sh
+# Surface Pro 12 (Intel): wire the IR camera (ST VD55G0) for plain V4L2 use.
+# Links IPU7 CSI2 1 to its first ISYS capture node and sets 8-bit greyscale
+# 644x604 end to end, so that /dev/videoN opens as a GREY camera (what
+# face-authentication tools such as irlume expect). Run by
+# sp12-ir-camera.service when IPU7's capture nodes appear.
+set -eu
+
+SENSOR='"vd55g1 2-0060"'
+CSI='"Intel IPU7 CSI2 1"'
+CAP_NAME='Intel IPU7 ISYS Capture 8'
+FMT='Y8_1X8/644x604'
+
+media=
+for i in $(seq 1 60); do
+	for m in /dev/media*; do
+		[ -e "$m" ] || continue
+		if media-ctl -d "$m" -p 2>/dev/null | grep -q 'entity.*vd55g1 2-0060'; then
+			media=$m
+			break 2
+		fi
+	done
+	sleep 0.5
+done
+[ -n "$media" ] || { echo "sp12-ir-graph: IR sensor not bound" >&2; exit 1; }
+
+media-ctl -d "$media" -l "$CSI:1 -> \"$CAP_NAME\":0 [1]"
+media-ctl -d "$media" -V "$SENSOR:0 [fmt:$FMT]"
+media-ctl -d "$media" -V "$CSI:0 [fmt:$FMT]"
+
+video=$(media-ctl -d "$media" -e "$CAP_NAME")
+v4l2-ctl -d "$video" --set-fmt-video=width=644,height=604,pixelformat=GREY
+echo "sp12-ir-graph: IR camera ready on $video (GREY 644x604)"

@@ -1,0 +1,240 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 11:00:00 -0400
+Subject: [PATCH] libcamera: software_isp: debayer_cpu: Add temporal noise
+ reduction to 2x2 binning
+
+Without a hardware ISP the soft ISP has no noise reduction, and sensors at
+high analogue gain (16x on the Surface Pro 12 front camera indoors) produce
+visible grain. On the binned path, keep a per-pixel, per-channel running
+average of the raw value (4 fractional bits) and blend each frame into it:
+a new frame weighs 1/4 where nothing changed, rising to 1 as the change
+approaches a noise threshold (base + slope * sqrt(raw), 10-bit units),
+beyond which the pixel takes the new value directly. Still areas average
+over frames; moving ones follow the input without trails.
+
+Measured on a static indoor scene at 1080p, 16x gain: frame-to-frame luma
+noise drops from 5.6 to 3.4 levels (about 40%), still 30 fps. Higher
+thresholds remove more (64,32,5: 50%) but leave faint trails behind motion,
+since the filter has no motion compensation.
+
+LIBCAMERA_SOFTISP_TNR tunes it ("alpha,base,slope", default 64,24,3) or
+turns it off ("0"). The history resets on every configure().
+
+---
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -12,13 +12,17 @@
+ #include "debayer_cpu.h"
+ 
+ #include <algorithm>
++#include <cmath>
++#include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <sys/ioctl.h>
+ #include <utility>
+ 
+ #include <linux/dma-buf.h>
+ 
+ #include <libcamera/base/thread.h>
++#include <libcamera/base/utils.h>
+ 
+ #include <libcamera/formats.h>
+ 
+@@ -429,8 +433,31 @@
+  * Return 0 on success, a negative errno value on failure
+  * (unsupported parameters).
+  */
++/*
++ * Blend a raw value into its history and return the filtered value. The
++ * weight of the new value rises from tnrAlpha_ (no change) to 1 (a change of
++ * the noise threshold or more), so still areas average over frames while
++ * moving ones follow the input without trails.
++ */
++inline int DebayerCpu::temporalFilter(uint16_t &hist, int value)
++{
++	const int cur = value << 4;
++	const int diff = cur - hist;
++	const int mag = diff < 0 ? -diff : diff;
++	const int thr = tnrThreshold_[std::min(value, 4095)];
++
++	if (!tnrPrimed_ || mag >= thr) {
++		hist = cur;
++		return value;
++	}
++
++	const int weight = tnrAlpha_ + (256 - tnrAlpha_) * mag / thr;
++	hist += diff * weight / 256;
++	return (hist + 8) >> 4;
++}
++
+ template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
+-void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[])
++void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist)
+ {
+ 	const pixel_t *l0 = reinterpret_cast<const pixel_t *>(src[0]);
+ 	const pixel_t *l1 = reinterpret_cast<const pixel_t *>(src[1]);
+@@ -458,10 +485,54 @@
+ 			r = l1[i];
+ 		}
+ 
++		if (hist) {
++			r = temporalFilter(hist[0], r);
++			g = temporalFilter(hist[1], g);
++			b = temporalFilter(hist[2], b);
++			hist += 3;
++		}
++
+ 		STORE_PIXEL(b / (div), g / (div), r / (div))
+ 	}
+ }
+ 
++/*
++ * LIBCAMERA_SOFTISP_TNR: "0" turns temporal noise reduction off; otherwise
++ * "alpha,base,slope" (defaults 64,24,3): alpha is the weight of a new frame
++ * in still areas (/256), and a change larger than base + slope * sqrt(value)
++ * raw units counts as motion. Units are 10-bit raw; other depths scale.
++ */
++void DebayerCpu::configureTnr()
++{
++	unsigned int alpha = 64;
++	double base = 24.0, slope = 3.0;
++	const char *env = utils::secure_getenv("LIBCAMERA_SOFTISP_TNR");
++
++	tnrEnabled_ = binning_;
++	if (env) {
++		if (!strcmp(env, "0"))
++			tnrEnabled_ = false;
++		else
++			sscanf(env, "%u,%lf,%lf", &alpha, &base, &slope);
++	}
++
++	tnrAlpha_ = std::clamp(alpha, 1u, 256u);
++	const double scale = tnrRawScale_;
++	for (unsigned int v = 0; v < tnrThreshold_.size(); v++) {
++		double thr = (base + slope * std::sqrt(static_cast<double>(v))) * scale;
++		tnrThreshold_[v] = std::clamp<int>(std::lround(thr * 16), 16, 65535);
++	}
++
++	tnrPrimed_ = false;
++	tnrHistory_.clear();
++	if (tnrEnabled_)
++		tnrHistory_.resize(static_cast<size_t>(window_.width / 2) * (window_.height / 2) * 3);
++
++	LOG(Debayer, Info)
++		<< "Temporal noise reduction " << (tnrEnabled_ ? "on" : "off")
++		<< (tnrEnabled_ ? " (alpha " + std::to_string(tnrAlpha_) + ")" : "");
++}
++
+ #define BINNED_METHOD(order, pixel_t, div)                                                                        \
+ 	(addAlphaByte                                                                                                  \
+ 		 ? (ccmEnabled ? &DebayerCpu::debayerBinned2x2<true, true, order, pixel_t, div>                        \
+@@ -495,6 +566,8 @@
+ void DebayerCpu::setBinnedFunction(const BayerFormat &bayerFormat, bool addAlphaByte, bool ccmEnabled)
+ {
+ 	debayerBinned_ = nullptr;
++	/* TNR thresholds are given in 10-bit units */
++	tnrRawScale_ = std::ldexp(1.0, static_cast<int>(bayerFormat.bitDepth) - 10);
+ 
+ 	if (bayerFormat.packing != BayerFormat::Packing::None ||
+ 	    !isStandardBayerOrder(bayerFormat.order))
+@@ -810,6 +883,8 @@
+ 		<< (binning_ ? "2x2 binning " : "debayering ") << window_
+ 		<< " to " << outputCfg.size;
+ 
++	configureTnr();
++
+ 	/*
+ 	 * Set the stats window to the whole processed window. Its coordinates are
+ 	 * relative to the debayered area since debayering passes only the part of
+@@ -976,6 +1051,11 @@
+ 	/* [0] previous- (unused by the stats), [1] current- and [2] next-line */
+ 	const uint8_t *linePointers[3];
+ 
++	const unsigned int histStride = debayer_->window_.width / 2 * 3;
++	uint16_t *hist = debayer_->tnrEnabled_
++				 ? debayer_->tnrHistory_.data() + yStart_ / 2 * histStride
++				 : nullptr;
++
+ 	for (unsigned int y = yStart_; y < yEnd_; y += 2) {
+ 		linePointers[1] = src;
+ 		linePointers[2] = src + inputStride;
+@@ -994,10 +1074,12 @@
+ 		linePointers[0] = linePointers[1];
+ 
+ 		debayer_->stats_->processLine0(frame, y, linePointers, threadIndex_);
+-		debayer_->debayerBinned(dst, linePointers + 1);
++		debayer_->debayerBinned(dst, linePointers + 1, hist);
+ 
+ 		src += 2 * inputStride;
+ 		dst += outputStride;
++		if (hist)
++			hist += histStride;
+ 	}
+ }
+ 
+@@ -1262,6 +1344,10 @@
+ 	 *
+ 	 * \todo Pass real bufferId once stats buffer passing is changed.
+ 	 */
++	/* The history now holds a whole frame: blend from the next one on. */
++	if (tnrEnabled_)
++		tnrPrimed_ = true;
++
+ 	stats_->finishFrame(frame, 0);
+ 	outputBufferReady.emit(output);
+ 	inputBufferReady.emit(input);
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -85,7 +85,15 @@
+ 	void debayer1(uint8_t *dst, const uint8_t *src[]) { (this->*debayer1_)(dst, src); }
+ 	void debayer2(uint8_t *dst, const uint8_t *src[]) { (this->*debayer2_)(dst, src); }
+ 	void debayer3(uint8_t *dst, const uint8_t *src[]) { (this->*debayer3_)(dst, src); }
+-	void debayerBinned(uint8_t *dst, const uint8_t *src[]) { (this->*debayerBinned_)(dst, src); }
++	/*
++	 * hist points to the output line's temporal-noise-reduction history, 3
++	 * values per pixel, or is null when temporal noise reduction is off.
++	 */
++	using binnedFn = void (DebayerCpu::*)(uint8_t *dst, const uint8_t *src[], uint16_t *hist);
++	void debayerBinned(uint8_t *dst, const uint8_t *src[], uint16_t *hist)
++	{
++		(this->*debayerBinned_)(dst, src, hist);
++	}
+ 
+ 	/*
+ 	 * 2x2 binning: each 2x2 Bayer block becomes one output pixel, the two
+@@ -93,7 +101,9 @@
+ 	 * lines, at the left edge of the window.
+ 	 */
+ 	template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
+-	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[]);
++	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist);
++	int temporalFilter(uint16_t &hist, int value);
++	void configureTnr();
+ 
+ 	/* 8-bit raw bayer format */
+ 	template<bool addAlphaByte, bool ccmEnabled>
+@@ -163,9 +173,21 @@
+ 	debayerFn debayer1_;
+ 	debayerFn debayer2_;
+ 	debayerFn debayer3_;
+-	debayerFn debayerBinned_;
++	binnedFn debayerBinned_;
+ 	/* Output is the window 2x2-binned, instead of debayered at full size */
+ 	bool binning_;
++
++	/*
++	 * Temporal noise reduction on the binned path: per output pixel and
++	 * channel a running average of the raw value (4 fractional bits),
++	 * reset where the change exceeds the expected noise.
++	 */
++	std::vector<uint16_t> tnrHistory_;
++	std::array<uint16_t, 4096> tnrThreshold_; /* per raw value, x16 */
++	unsigned int tnrAlpha_;                    /* weight of a new frame, /256 */
++	double tnrRawScale_;                       /* raw units per 10-bit unit */
++	bool tnrEnabled_;
++	bool tnrPrimed_;
+ 	Rectangle window_;
+ 	std::unique_ptr<SwStatsCpu> stats_;
+ 	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */

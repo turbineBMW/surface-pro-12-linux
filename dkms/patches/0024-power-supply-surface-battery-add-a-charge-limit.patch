@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 15:00:00 -0400
+Subject: [PATCH] power: supply: surface_battery: Add a charge limit
+
+The Windows Surface app offers "Limit to 80%" next to adaptive charging.
+It sets a user charge mode on the battery (BAT target, command 0x0a,
+payload {u8 mode; __le32 threshold}: 0 adaptive, 1 user limit, 2 unlimited
+until a timeout), where the firmware supports it: the SAM protection
+policy (SAM target, command 0x3a) then has its battery charge limit bit
+(0x10) set. Command IDs and layouts come from the Windows battery drivers
+and the Surface app's battery service; on a Surface Pro 12 (Intel) a limit
+below the current charge stops charging on AC at once, and adaptive mode
+resumes it.
+
+Expose this as charge_control_end_threshold on the main battery when the
+policy bit is set: 100 selects adaptive charging, 50-99 a user limit.
+There is no request to read the mode back, so the driver starts from
+adaptive charging and re-applies its setting after resume.
+---
+--- a/drivers/power/supply/surface_battery.c
++++ b/drivers/power/supply/surface_battery.c
+@@ -108,6 +108,43 @@
+ 	.command_id      = 0x04,
+ });
+ 
++/*
++ * User charge mode, as set by the Windows Surface app: adaptive (smart)
++ * charging, or holding the battery at a user limit. A third mode, charging
++ * to 100% until a timeout, is not used here.
++ */
++enum spwr_charge_mode {
++	SPWR_CHARGE_MODE_ADAPTIVE	= 0,
++	SPWR_CHARGE_MODE_USER_LIMIT	= 1,
++};
++
++struct spwr_user_charge_mode {
++	u8 mode;
++	__le32 threshold;	/* Percent, for SPWR_CHARGE_MODE_USER_LIMIT. */
++} __packed;
++
++static_assert(sizeof(struct spwr_user_charge_mode) == 5);
++
++/* Set user charge mode. */
++SSAM_DEFINE_SYNC_REQUEST_CL_W(ssam_bat_set_charge_mode, struct spwr_user_charge_mode, {
++	.target_category = SSAM_SSH_TC_BAT,
++	.command_id      = 0x0a,
++});
++
++/* Battery protection policy bit: firmware supports the charge limit. */
++#define SAM_PROTECTION_POLICY_CHARGE_LIMIT	BIT(4)
++
++/* Get battery protection policy. */
++SSAM_DEFINE_SYNC_REQUEST_R(ssam_get_protection_policy, u8, {
++	.target_category = SSAM_SSH_TC_SAM,
++	.target_id       = SSAM_SSH_TID_SAM,
++	.command_id      = 0x3a,
++	.instance_id     = 0x00,
++});
++
++/* Lowest charge limit accepted; the Surface app offers 80%. */
++#define SPWR_CHARGE_LIMIT_MIN		50
++
+ 
+ /* -- Device structures. ---------------------------------------------------- */
+ 
+@@ -122,6 +159,7 @@
+ 	char name[32];
+ 	struct power_supply *psy;
+ 	struct power_supply_desc psy_desc;
++	enum power_supply_property *props;
+ 
+ 	struct delayed_work update_work;
+ 
+@@ -134,6 +172,8 @@
+ 	struct spwr_bix bix;
+ 	struct spwr_bst bst;
+ 	u32 alarm;
++	bool has_charge_limit;
++	u32 charge_limit;	/* Percent; 100 means adaptive charging. */
+ };
+ 
+ 
+@@ -461,6 +501,29 @@
+ 	POWER_SUPPLY_PROP_SERIAL_NUMBER,
+ };
+ 
++static int spwr_battery_set_charge_limit_unlocked(struct spwr_battery_device *bat, u32 limit)
++{
++	struct spwr_user_charge_mode cm = {};
++	int status;
++
++	lockdep_assert_held(&bat->lock);
++
++	if (limit >= 100) {
++		limit = 100;
++		cm.mode = SPWR_CHARGE_MODE_ADAPTIVE;
++	} else {
++		cm.mode = SPWR_CHARGE_MODE_USER_LIMIT;
++		cm.threshold = cpu_to_le32(limit);
++	}
++
++	status = ssam_retry(ssam_bat_set_charge_mode, bat->sdev, &cm);
++	if (status)
++		return status;
++
++	bat->charge_limit = limit;
++	return 0;
++}
++
+ static int spwr_battery_prop_status(struct spwr_battery_device *bat)
+ {
+ 	u32 state = get_unaligned_le32(&bat->bst.state);
+@@ -652,6 +715,10 @@
+ 		val->strval = bat->bix.serial;
+ 		break;
+ 
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		val->intval = bat->charge_limit;
++		break;
++
+ 	default:
+ 		status = -EINVAL;
+ 		break;
+@@ -663,6 +730,32 @@
+ }
+ 
+ 
++static int spwr_battery_set_property(struct power_supply *psy, enum power_supply_property psp,
++				     const union power_supply_propval *val)
++{
++	struct spwr_battery_device *bat = power_supply_get_drvdata(psy);
++	int status;
++
++	if (psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD)
++		return -EINVAL;
++
++	if (val->intval < SPWR_CHARGE_LIMIT_MIN || val->intval > 100)
++		return -EINVAL;
++
++	mutex_lock(&bat->lock);
++	status = spwr_battery_set_charge_limit_unlocked(bat, val->intval);
++	mutex_unlock(&bat->lock);
++
++	return status;
++}
++
++static int spwr_battery_property_is_writeable(struct power_supply *psy,
++					      enum power_supply_property psp)
++{
++	return psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD;
++}
++
++
+ /* -- Alarm attribute. ------------------------------------------------------ */
+ 
+ static ssize_t alarm_show(struct device *dev, struct device_attribute *attr, char *buf)
+@@ -795,6 +888,41 @@
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * The main battery of devices whose firmware reports the charge limit
++	 * in its protection policy (as Windows checks) gets a charge limit.
++	 * There is no request to read the user charge mode back, so start from
++	 * adaptive charging, the firmware default.
++	 */
++	if (bat->sdev->uid.target == SSAM_SSH_TID_SAM) {
++		u8 policy;
++
++		if (!ssam_get_protection_policy(bat->sdev->ctrl, &policy) &&
++		    (policy & SAM_PROTECTION_POLICY_CHARGE_LIMIT)) {
++			size_t n = bat->psy_desc.num_properties;
++
++			bat->props = devm_kcalloc(&bat->sdev->dev, n + 1, sizeof(*bat->props),
++						  GFP_KERNEL);
++			if (!bat->props)
++				return -ENOMEM;
++
++			memcpy(bat->props, bat->psy_desc.properties, n * sizeof(*bat->props));
++			bat->props[n] = POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD;
++			bat->psy_desc.properties = bat->props;
++			bat->psy_desc.num_properties = n + 1;
++			bat->psy_desc.set_property = spwr_battery_set_property;
++			bat->psy_desc.property_is_writeable = spwr_battery_property_is_writeable;
++
++			mutex_lock(&bat->lock);
++			status = spwr_battery_set_charge_limit_unlocked(bat, 100);
++			mutex_unlock(&bat->lock);
++			if (status)
++				return status;
++
++			bat->has_charge_limit = true;
++		}
++	}
++
+ 	psy_cfg.drv_data = bat;
+ 	psy_cfg.attr_grp = spwr_battery_groups;
+ 
+@@ -810,7 +938,19 @@
+ 
+ static int __maybe_unused surface_battery_resume(struct device *dev)
+ {
+-	return spwr_battery_recheck_full(dev_get_drvdata(dev));
++	struct spwr_battery_device *bat = dev_get_drvdata(dev);
++	int status;
++
++	/* Re-apply the charge limit in case the firmware lost it. */
++	if (bat->has_charge_limit) {
++		mutex_lock(&bat->lock);
++		status = spwr_battery_set_charge_limit_unlocked(bat, bat->charge_limit);
++		mutex_unlock(&bat->lock);
++		if (status)
++			dev_warn(dev, "failed to restore charge limit: %d\n", status);
++	}
++
++	return spwr_battery_recheck_full(bat);
+ }
+ static SIMPLE_DEV_PM_OPS(surface_battery_pm_ops, NULL, surface_battery_resume);
+ 
+-- 
+2.53.0

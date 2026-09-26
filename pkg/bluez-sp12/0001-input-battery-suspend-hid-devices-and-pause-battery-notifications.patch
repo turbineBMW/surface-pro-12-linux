@@ -1,0 +1,717 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 19:30:00 -0400
+Subject: [PATCH] input/battery: Suspend HID devices and pause battery
+ notifications over system sleep
+
+bluetoothd is not told about system sleep: the HoG input plugin has
+suspend/resume callbacks that write the HID Control Point, but the only
+backend is suspend-none. A keyboard kept connected over suspend so that it
+can wake the system (Surface Pro Flex Keyboard: HID Information flags
+RemoteWake | NormallyConnectable) then sends a Battery Level notification
+about every 62 s, each of which wakes the host.
+
+Add src/sleep.c: it watches systemd-logind's PrepareForSleep and holds a
+delay inhibitor, running registered suspend callbacks and releasing the
+inhibitor 300 ms later so their writes reach devices first; on resume it
+runs the resume callbacks and takes the inhibitor again. Use it for:
+
+- HoG: suspend-sleep replaces suspend-none, so HID Control Point Suspend
+  (0x00) / Exit Suspend (0x01) are written on sleep and resume. The write
+  now covers every HID service instance of a device, not just the first,
+  and skips bonded devices that aren't connected (no HoG instance; the
+  callback dereferenced NULL for them, unnoticed while it never ran).
+- HoG: input reports in vendor-defined top-level collections (usage page
+  0xff00-0xffff, found by walking the report map) have their notifications
+  turned off over sleep and back on after it. The Flex Keyboard ignores
+  HID Suspend for its vendor status report (ID 0xd1, page 0xfff5), which
+  otherwise woke the host about a minute into every suspend.
+- Battery: Battery Level notifications are unregistered (CCC off) on sleep
+  and registered again on resume.
+---
+diff --git i/Makefile.am w/Makefile.am
+index 76c4ab5..307c0d8 100644
+--- i/Makefile.am
++++ w/Makefile.am
+@@ -332,6 +332,7 @@ bluetoothd_internal_sources = \
+ 			src/eir.h src/eir.c \
+ 			src/adv_monitor.h src/adv_monitor.c \
+ 			src/battery.h src/battery.c \
++			src/sleep.h src/sleep.c \
+ 			src/settings.h src/settings.c \
+ 			src/set.h src/set.c \
+ 			src/bearer.h src/bearer.c
+diff --git i/Makefile.plugins w/Makefile.plugins
+index ac667be..483b9fd 100644
+--- i/Makefile.plugins
++++ w/Makefile.plugins
+@@ -64,7 +64,7 @@ builtin_sources += profiles/input/hog.c \
+ 			profiles/deviceinfo/dis.c profiles/deviceinfo/dis.h \
+ 			profiles/battery/bas.c profiles/battery/bas.h \
+ 			profiles/scanparam/scpp.c profiles/scanparam/scpp.h \
+-			profiles/input/suspend.h profiles/input/suspend-none.c
++			profiles/input/suspend.h profiles/input/suspend-sleep.c
+ endif
+ 
+ builtin_modules += gap
+diff --git i/profiles/battery/battery.c w/profiles/battery/battery.c
+index 2fe1f4a..17ea19f 100644
+--- i/profiles/battery/battery.c
++++ w/profiles/battery/battery.c
+@@ -40,6 +40,7 @@
+ #include "src/service.h"
+ #include "src/log.h"
+ #include "src/battery.h"
++#include "src/sleep.h"
+ #include "attrib/att.h"
+ 
+ #define BATTERY_INTERFACE "org.bluez.Battery1"
+@@ -59,10 +60,16 @@ struct batt {
+ 
+ 	uint8_t *initial_value;
+ 	uint8_t percentage;
++	bool paused;		/* Notifications off over system sleep */
+ };
+ 
++/* Batteries with notifications set up, paused over system sleep */
++static struct queue *active_batts;
++static unsigned int sleep_id;
++
+ static void batt_free(struct batt *batt)
+ {
++	queue_remove(active_batts, batt);
+ 	gatt_db_unref(batt->db);
+ 	bt_gatt_client_unref(batt->client);
+ 	btd_device_unref(batt->device);
+@@ -74,6 +81,9 @@ static void batt_free(struct batt *batt)
+ 
+ static void batt_reset(struct batt *batt)
+ {
++	queue_remove(active_batts, batt);
++	batt->batt_level_cb_id = 0;
++	batt->paused = false;
+ 	batt->attr = NULL;
+ 	batt->percentage = -1;
+ 	gatt_db_unref(batt->db);
+@@ -144,6 +154,9 @@ static void batt_io_ccc_written_cb(uint16_t att_ecode, void *user_data)
+ 	g_free (batt->initial_value);
+ 	batt->initial_value = NULL;
+ 
++	if (!queue_find(active_batts, NULL, batt))
++		queue_push_tail(active_batts, batt);
++
+ 	DBG("Battery Level: notification enabled");
+ }
+ 
+@@ -185,6 +198,55 @@ static void handle_battery_level(struct batt *batt, uint16_t value_handle)
+ 		DBG("Failed to send request to read battery level");
+ }
+ 
++/*
++ * Devices that stay connected over system sleep (e.g. keyboards kept for
++ * wakeup) would wake the host with each battery update, so turn the
++ * notifications off for the sleep and back on after it.
++ */
++static void batt_resumed_ccc_cb(uint16_t att_ecode, void *user_data)
++{
++	if (att_ecode)
++		error("Battery Level: notifications not re-enabled %s",
++		      att_ecode2str(att_ecode));
++}
++
++static void batt_suspend_one(void *data, void *user_data)
++{
++	struct batt *batt = data;
++
++	if (!batt->client || !batt->batt_level_cb_id)
++		return;
++
++	bt_gatt_client_unregister_notify(batt->client, batt->batt_level_cb_id);
++	batt->batt_level_cb_id = 0;
++	batt->paused = true;
++}
++
++static void batt_resume_one(void *data, void *user_data)
++{
++	struct batt *batt = data;
++
++	if (!batt->paused || !batt->client)
++		return;
++
++	batt->paused = false;
++	batt->batt_level_cb_id =
++		bt_gatt_client_register_notify(batt->client,
++					       batt->batt_level_io_handle,
++					       batt_resumed_ccc_cb,
++					       batt_io_value_cb, batt, NULL);
++}
++
++static void batt_sleep_suspend(void *user_data)
++{
++	queue_foreach(active_batts, batt_suspend_one, NULL);
++}
++
++static void batt_sleep_resume(void *user_data)
++{
++	queue_foreach(active_batts, batt_resume_one, NULL);
++}
++
+ static bool uuid_cmp(uint16_t u16, const bt_uuid_t *uuid)
+ {
+ 	bt_uuid_t lhs;
+@@ -337,11 +399,18 @@ static struct btd_profile batt_profile = {
+ 
+ static int batt_init(void)
+ {
++	active_batts = queue_new();
++	sleep_id = btd_sleep_register(batt_sleep_suspend, batt_sleep_resume,
++									NULL);
++
+ 	return btd_profile_register(&batt_profile);
+ }
+ 
+ static void batt_exit(void)
+ {
++	btd_sleep_unregister(sleep_id);
++	queue_destroy(active_batts, NULL);
++	active_batts = NULL;
+ 	btd_profile_unregister(&batt_profile);
+ }
+ 
+diff --git i/profiles/input/hog-lib.c w/profiles/input/hog-lib.c
+index 70a1bdc..9516624 100644
+--- i/profiles/input/hog-lib.c
++++ w/profiles/input/hog-lib.c
+@@ -98,6 +98,8 @@ struct bt_hog {
+ 	struct queue		*gatt_op;
+ 	struct gatt_db		*gatt_db;
+ 	struct gatt_db_attribute	*report_map_attr;
++	/* Input report IDs in vendor-defined top-level collections */
++	uint8_t			vendor_input[32];
+ };
+ 
+ struct report {
+@@ -986,6 +988,99 @@ fail:
+ 	report_reply(hog, err, 0, 0, NULL);
+ }
+ 
++/*
++ * Note the input report IDs that belong to top-level collections with a
++ * vendor-defined usage page (0xff00-0xffff): status and configuration, not
++ * user input. They are paused over system sleep.
++ */
++static void mark_vendor_reports(struct bt_hog *hog, const uint8_t *map,
++								size_t len)
++{
++	uint32_t page = 0, top_page = 0;
++	uint8_t id = 0;
++	int depth = 0;
++	size_t i = 0;
++
++	memset(hog->vendor_input, 0, sizeof(hog->vendor_input));
++
++	while (i < len) {
++		uint8_t prefix = map[i];
++		uint8_t size, type, tag;
++		uint32_t data = 0;
++		size_t k;
++
++		if (prefix == 0xfe) {		/* long item */
++			if (i + 1 >= len)
++				break;
++			i += 3 + map[i + 1];
++			continue;
++		}
++
++		size = (prefix & 0x03) == 3 ? 4 : (prefix & 0x03);
++		type = (prefix >> 2) & 0x03;
++		tag = prefix >> 4;
++		if (i + 1 + size > len)
++			break;
++		for (k = 0; k < size; k++)
++			data |= (uint32_t) map[i + 1 + k] << (8 * k);
++		i += 1 + size;
++
++		if (type == 1 && tag == 0x0)		/* Usage Page */
++			page = data;
++		else if (type == 1 && tag == 0x8)	/* Report ID */
++			id = data;
++		else if (type == 0 && tag == 0xa) {	/* Collection */
++			if (depth++ == 0)
++				top_page = page;
++		} else if (type == 0 && tag == 0xc) {	/* End Collection */
++			if (depth > 0)
++				depth--;
++		} else if (type == 0 && tag == 0x8) {	/* Input */
++			if (id && top_page >= 0xff00)
++				hog->vendor_input[id / 8] |= 1 << (id % 8);
++		}
++	}
++}
++
++static bool is_vendor_input(struct bt_hog *hog, struct report *report)
++{
++	return report->type == HOG_REPORT_TYPE_INPUT && report->id &&
++		(hog->vendor_input[report->id / 8] & (1 << (report->id % 8)));
++}
++
++static void vendor_ccc_written_cb(guint8 status, const guint8 *pdu,
++					guint16 plen, gpointer user_data)
++{
++	struct gatt_request *req = user_data;
++
++	if (status)
++		error("hog: vendor report CCC write failed: %s",
++							att_ecode2str(status));
++
++	remove_gatt_req(req, status);
++}
++
++/* Turn vendor input report notifications off over sleep, on after it */
++static void set_vendor_reports(struct bt_hog *hog, bool suspend)
++{
++	uint8_t value[2];
++	GSList *l;
++
++	put_le16(suspend ? 0 : GATT_CLIENT_CHARAC_CFG_NOTIF_BIT, value);
++
++	for (l = hog->reports; l; l = l->next) {
++		struct report *r = l->data;
++
++		if (!r->ccc_handle || !is_vendor_input(hog, r))
++			continue;
++
++		DBG("%s notifications of vendor report 0x%02x",
++				suspend ? "Pausing" : "Resuming", r->id);
++		write_char(hog, hog->attrib, r->ccc_handle, value,
++				sizeof(value), vendor_ccc_written_cb, r);
++	}
++}
++
+ static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
+ 							size_t report_map_len)
+ {
+@@ -995,6 +1090,8 @@ static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
+ 	GError *gerr = NULL;
+ 	bdaddr_t src, dst;
+ 
++	mark_vendor_reports(hog, report_map, report_map_len);
++
+ 	bt_io_get(g_attrib_get_channel(hog->attrib), &gerr,
+ 			BT_IO_OPT_SOURCE_BDADDR, &src,
+ 			BT_IO_OPT_DEST_BDADDR, &dst,
+@@ -1803,17 +1900,30 @@ done:
+ int bt_hog_set_control_point(struct bt_hog *hog, bool suspend)
+ {
+ 	uint8_t value = suspend ? 0x00 : 0x01;
++	bool sent = false;
++	GSList *l;
++
++	if (!hog)
++		return -EINVAL;
+ 
+ 	if (hog->attrib == NULL)
+ 		return -ENOTCONN;
+ 
+-	if (hog->ctrlpt_handle == 0)
+-		return -ENOTSUP;
++	if (hog->ctrlpt_handle) {
++		gatt_write_cmd(hog->attrib, hog->ctrlpt_handle, &value,
++						sizeof(value), NULL, NULL);
++		sent = true;
++	}
+ 
+-	gatt_write_cmd(hog->attrib, hog->ctrlpt_handle, &value,
+-					sizeof(value), NULL, NULL);
++	/* Status reports that keep coming would still wake the host */
++	set_vendor_reports(hog, suspend);
+ 
+-	return 0;
++	/* Devices with several HID services have a control point in each */
++	for (l = hog->instances; l; l = l->next)
++		if (!bt_hog_set_control_point(l->data, suspend))
++			sent = true;
++
++	return sent ? 0 : -ENOTSUP;
+ }
+ 
+ int bt_hog_send_report(struct bt_hog *hog, void *data, size_t size, int type)
+diff --git i/profiles/input/hog.c w/profiles/input/hog.c
+index f50a0f2..90fe3ab 100644
+--- i/profiles/input/hog.c
++++ w/profiles/input/hog.c
+@@ -116,6 +116,10 @@ static void set_suspend(gpointer data, gpointer user_data)
+ 	struct hog_device *dev = data;
+ 	gboolean suspend = GPOINTER_TO_INT(user_data);
+ 
++	/* Bonded devices that aren't connected have no HoG instance */
++	if (!dev->hog)
++		return;
++
+ 	bt_hog_set_control_point(dev->hog, suspend);
+ }
+ 
+diff --git i/profiles/input/suspend-sleep.c w/profiles/input/suspend-sleep.c
+new file mode 100644
+index 0000000..7f49eee
+--- /dev/null
++++ w/profiles/input/suspend-sleep.c
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ *
++ *  BlueZ - Bluetooth protocol stack for Linux
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <errno.h>
++#include <stdlib.h>
++
++#include "src/sleep.h"
++#include "suspend.h"
++
++/* HoG suspend on system sleep, from logind (src/sleep.c) */
++
++static suspend_event suspend_cb;
++static resume_event resume_cb;
++static unsigned int sleep_id;
++
++static void on_suspend(void *user_data)
++{
++	if (suspend_cb)
++		suspend_cb();
++}
++
++static void on_resume(void *user_data)
++{
++	if (resume_cb)
++		resume_cb();
++}
++
++int suspend_init(suspend_event suspend, resume_event resume)
++{
++	suspend_cb = suspend;
++	resume_cb = resume;
++
++	sleep_id = btd_sleep_register(on_suspend, on_resume, NULL);
++
++	return sleep_id ? 0 : -ENOTSUP;
++}
++
++void suspend_exit(void)
++{
++	btd_sleep_unregister(sleep_id);
++	sleep_id = 0;
++	suspend_cb = NULL;
++	resume_cb = NULL;
++}
+diff --git i/src/main.c w/src/main.c
+index 8aa19a3..317f926 100644
+--- i/src/main.c
++++ w/src/main.c
+@@ -53,6 +53,7 @@
+ #include "device.h"
+ #include "dbus-common.h"
+ #include "agent.h"
++#include "sleep.h"
+ #include "profile.h"
+ 
+ #define BLUEZ_NAME "org.bluez"
+@@ -1673,6 +1674,7 @@ int main(int argc, char *argv[])
+ 	btd_device_init();
+ 	btd_agent_init();
+ 	btd_profile_init();
++	btd_sleep_init();
+ 
+ 	if (btd_opts.mode != BT_MODE_LE) {
+ 		if (option_compat == TRUE)
+@@ -1712,6 +1714,7 @@ int main(int argc, char *argv[])
+ 
+ 	plugin_cleanup();
+ 
++	btd_sleep_cleanup();
+ 	btd_profile_cleanup();
+ 	btd_agent_cleanup();
+ 	btd_device_cleanup();
+diff --git i/src/sleep.c w/src/sleep.c
+new file mode 100644
+index 0000000..189233c
+--- /dev/null
++++ w/src/sleep.c
+@@ -0,0 +1,243 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ *
++ *  BlueZ - Bluetooth protocol stack for Linux
++ *
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#include <glib.h>
++#include <dbus/dbus.h>
++
++#include "gdbus/gdbus.h"
++
++#include "src/shared/queue.h"
++#include "src/shared/util.h"
++#include "dbus-common.h"
++#include "log.h"
++#include "sleep.h"
++
++#define LOGIND_SERVICE		"org.freedesktop.login1"
++#define LOGIND_PATH		"/org/freedesktop/login1"
++#define LOGIND_MANAGER		"org.freedesktop.login1.Manager"
++
++/* Time for suspend writes to reach devices before sleep may proceed */
++#define SLEEP_RELEASE_MS	300
++
++struct sleep_listener {
++	unsigned int id;
++	btd_sleep_func_t suspend;
++	btd_sleep_func_t resume;
++	void *user_data;
++};
++
++static struct queue *listeners;
++static unsigned int next_id = 1;
++static guint signal_watch;
++static guint release_timer;
++static int inhibit_fd = -1;
++static bool suspended;
++
++static void release_inhibitor(void)
++{
++	if (inhibit_fd < 0)
++		return;
++
++	close(inhibit_fd);
++	inhibit_fd = -1;
++}
++
++static void inhibit_reply(DBusPendingCall *call, void *user_data)
++{
++	DBusMessage *reply = dbus_pending_call_steal_reply(call);
++	DBusError err;
++	int fd;
++
++	dbus_error_init(&err);
++
++	if (dbus_set_error_from_message(&err, reply)) {
++		error("sleep: logind inhibit failed: %s", err.message);
++		dbus_error_free(&err);
++		goto done;
++	}
++
++	if (!dbus_message_get_args(reply, &err, DBUS_TYPE_UNIX_FD, &fd,
++							DBUS_TYPE_INVALID)) {
++		error("sleep: invalid logind inhibit reply: %s", err.message);
++		dbus_error_free(&err);
++		goto done;
++	}
++
++	/* A sleep may have started while the call was pending */
++	if (suspended) {
++		close(fd);
++		goto done;
++	}
++
++	release_inhibitor();
++	inhibit_fd = fd;
++	DBG("sleep: delay inhibitor taken");
++
++done:
++	dbus_message_unref(reply);
++	dbus_pending_call_unref(call);
++}
++
++static void take_inhibitor(void)
++{
++	DBusConnection *conn = btd_get_dbus_connection();
++	const char *what = "sleep", *who = "bluetoothd";
++	const char *why = "Suspend connected Bluetooth input devices";
++	const char *mode = "delay";
++	DBusPendingCall *call;
++	DBusMessage *msg;
++
++	msg = dbus_message_new_method_call(LOGIND_SERVICE, LOGIND_PATH,
++						LOGIND_MANAGER, "Inhibit");
++	if (!msg)
++		return;
++
++	dbus_message_append_args(msg, DBUS_TYPE_STRING, &what,
++					DBUS_TYPE_STRING, &who,
++					DBUS_TYPE_STRING, &why,
++					DBUS_TYPE_STRING, &mode,
++					DBUS_TYPE_INVALID);
++
++	if (!dbus_connection_send_with_reply(conn, msg, &call, -1) || !call) {
++		error("sleep: unable to request logind inhibitor");
++		dbus_message_unref(msg);
++		return;
++	}
++
++	dbus_pending_call_set_notify(call, inhibit_reply, NULL, NULL);
++	dbus_message_unref(msg);
++}
++
++static gboolean release_timeout(gpointer user_data)
++{
++	release_timer = 0;
++	release_inhibitor();
++	DBG("sleep: delay inhibitor released");
++
++	return FALSE;
++}
++
++static void call_suspend(void *data, void *user_data)
++{
++	struct sleep_listener *l = data;
++
++	if (l->suspend)
++		l->suspend(l->user_data);
++}
++
++static void call_resume(void *data, void *user_data)
++{
++	struct sleep_listener *l = data;
++
++	if (l->resume)
++		l->resume(l->user_data);
++}
++
++static gboolean prepare_for_sleep(DBusConnection *conn, DBusMessage *msg,
++							void *user_data)
++{
++	dbus_bool_t start;
++
++	if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_BOOLEAN, &start,
++							DBUS_TYPE_INVALID))
++		return TRUE;
++
++	if (start && !suspended) {
++		suspended = true;
++		DBG("sleep: suspending");
++		queue_foreach(listeners, call_suspend, NULL);
++
++		if (release_timer)
++			g_source_remove(release_timer);
++		release_timer = g_timeout_add(SLEEP_RELEASE_MS,
++						release_timeout, NULL);
++	} else if (!start && suspended) {
++		suspended = false;
++		DBG("sleep: resuming");
++
++		if (release_timer) {
++			g_source_remove(release_timer);
++			release_timer = 0;
++		}
++		release_inhibitor();
++
++		queue_foreach(listeners, call_resume, NULL);
++		take_inhibitor();
++	}
++
++	return TRUE;
++}
++
++unsigned int btd_sleep_register(btd_sleep_func_t suspend,
++				btd_sleep_func_t resume, void *user_data)
++{
++	struct sleep_listener *l;
++
++	if (!listeners)
++		return 0;
++
++	l = new0(struct sleep_listener, 1);
++	l->id = next_id++;
++	l->suspend = suspend;
++	l->resume = resume;
++	l->user_data = user_data;
++	queue_push_tail(listeners, l);
++
++	return l->id;
++}
++
++static bool match_id(const void *data, const void *match_data)
++{
++	const struct sleep_listener *l = data;
++
++	return l->id == PTR_TO_UINT(match_data);
++}
++
++void btd_sleep_unregister(unsigned int id)
++{
++	if (listeners)
++		queue_remove_all(listeners, match_id, UINT_TO_PTR(id), free);
++}
++
++void btd_sleep_init(void)
++{
++	DBusConnection *conn = btd_get_dbus_connection();
++
++	listeners = queue_new();
++
++	signal_watch = g_dbus_add_signal_watch(conn, LOGIND_SERVICE,
++						LOGIND_PATH, LOGIND_MANAGER,
++						"PrepareForSleep",
++						prepare_for_sleep, NULL, NULL);
++	take_inhibitor();
++}
++
++void btd_sleep_cleanup(void)
++{
++	DBusConnection *conn = btd_get_dbus_connection();
++
++	if (signal_watch)
++		g_dbus_remove_watch(conn, signal_watch);
++	signal_watch = 0;
++
++	if (release_timer)
++		g_source_remove(release_timer);
++	release_timer = 0;
++
++	release_inhibitor();
++	queue_destroy(listeners, free);
++	listeners = NULL;
++}
+diff --git i/src/sleep.h w/src/sleep.h
+new file mode 100644
+index 0000000..ce3ce26
+--- /dev/null
++++ w/src/sleep.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ *
++ *  BlueZ - Bluetooth protocol stack for Linux
++ *
++ */
++
++/*
++ * System sleep notifications from systemd-logind. Suspend callbacks run
++ * while bluetoothd holds a short delay inhibitor, so what they send reaches
++ * connected devices before the system sleeps.
++ */
++
++typedef void (*btd_sleep_func_t)(void *user_data);
++
++unsigned int btd_sleep_register(btd_sleep_func_t suspend,
++				btd_sleep_func_t resume, void *user_data);
++void btd_sleep_unregister(unsigned int id);
++
++void btd_sleep_init(void);
++void btd_sleep_cleanup(void);
+-- 
+2.53.0
