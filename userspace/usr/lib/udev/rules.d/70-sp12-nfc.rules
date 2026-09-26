@@ -1,0 +1,2 @@
+# Surface Pro 12 (Intel): start the NFC reader daemon once the PN560 appears.
+SUBSYSTEM=="nfc", ACTION=="add", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sp12-nfc.service"

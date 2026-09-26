@@ -1,0 +1,747 @@
+#!/usr/bin/python3
+# Surface Pro 12 (Intel): NFC reader daemon for the PN560 (nxp-nci).
+#
+# Keeps the kernel NFC device polling and reports every tag, card or phone it
+# reads to user sessions, so a desktop plugin can chime and show the read, and
+# scripts can react to it.
+#
+# Why a daemon: the NFC netlink commands need CAP_NET_ADMIN, and the PN560 only
+# sees passive cards when discovery includes a listen phase (dual mode: reader
+# protocols plus NFC-DEP target mode), which no stock userspace on this system
+# asks for. See docs/peripheral-plan.md, 8b.
+#
+# What "read" means, per target:
+#   Type 2 tags (NTAG, MIFARE Ultralight): the NDEF message (text, URI, ...).
+#   ISO-DEP (ISO 14443-4) cards and phones: the NDEF Type 4 application if
+#     present, else the payment application list (PPSE: brand, label, AID).
+#     Nothing beyond the directory is read: no PAN, no records.
+#   FeliCa, ISO 15693, Jewel: identity only.
+#
+# Output, one JSON object per line:
+#   /run/sp12-nfc/events   Unix stream socket; every connected client gets
+#                          each event as it happens, plus a "reader" event on
+#                          connect.
+#   /run/sp12-nfc/last     the last "card" event (for scripts and `sp12-nfc last`).
+#
+# Signals: SIGHUP restarts discovery (use it after resume), SIGTERM stops
+# polling and takes the device down before exiting (never remove nxp-nci while
+# the device is up: it deadlocks).
+import ctypes
+import errno
+import json
+import os
+import select
+import signal
+import socket
+import struct
+import sys
+import time
+
+RUN_DIR = os.environ.get("RUNTIME_DIRECTORY", "/run/sp12-nfc")
+SOCK_PATH = os.path.join(RUN_DIR, "events")
+LAST_PATH = os.path.join(RUN_DIR, "last")
+
+# Netlink / generic netlink.
+NETLINK_GENERIC, GENL_ID_CTRL, CTRL_CMD_GETFAMILY = 16, 0x10, 3
+CTRL_ATTR_FAMILY_ID, CTRL_ATTR_FAMILY_NAME, CTRL_ATTR_MCAST_GROUPS = 1, 2, 7
+NLM_F_REQUEST, NLM_F_ACK, NLM_F_DUMP = 1, 4, 0x300
+NLMSG_ERROR, NLMSG_DONE = 2, 3
+SOL_NETLINK, NETLINK_ADD_MEMBERSHIP = 270, 1
+
+# linux/nfc.h
+CMD_GET_DEVICE, CMD_DEV_UP, CMD_DEV_DOWN = 1, 2, 3
+CMD_START_POLL, CMD_STOP_POLL, CMD_GET_TARGET = 6, 7, 8
+EVENT_TARGETS_FOUND, EVENT_DEVICE_ADDED, EVENT_DEVICE_REMOVED, EVENT_TARGET_LOST = 9, 10, 11, 12
+ATTR_DEVICE_INDEX, ATTR_DEVICE_NAME, ATTR_PROTOCOLS, ATTR_TARGET_INDEX = 1, 2, 3, 4
+ATTR_SENS_RES, ATTR_SEL_RES, ATTR_NFCID1, ATTR_SENSB_RES, ATTR_SENSF_RES = 5, 6, 7, 8, 9
+ATTR_DEVICE_POWERED, ATTR_IM_PROTOCOLS, ATTR_TM_PROTOCOLS = 12, 13, 14
+ATTR_ISO15693_DSFID, ATTR_ISO15693_UID = 26, 27
+PROTO_JEWEL, PROTO_MIFARE, PROTO_FELICA, PROTO_ISO14443, PROTO_NFC_DEP = 1, 2, 3, 4, 5
+PROTO_ISO14443_B, PROTO_ISO15693 = 6, 7
+PROTO_NAMES = {PROTO_JEWEL: "Type 1 (Jewel)", PROTO_MIFARE: "Type 2 (MIFARE)", PROTO_FELICA: "FeliCa",
+               PROTO_ISO14443: "ISO14443-A", PROTO_NFC_DEP: "NFC-DEP", PROTO_ISO14443_B: "ISO14443-B",
+               PROTO_ISO15693: "ISO15693"}
+ALL_IM = sum(1 << p for p in PROTO_NAMES)
+AF_NFC, NFC_SOCKPROTO_RAW = 39, 0
+
+# Same fixed UID seen again within this window is the same presence: no new event.
+QUIET_SECS = 3.0
+# Pause between a detection and the next discovery cycle.
+REPOLL_DELAY = 0.6
+
+# EMV application identifiers, RID (first 5 bytes) to brand.
+BRANDS = {"a000000003": "Visa", "a000000004": "Mastercard", "a000000025": "American Express",
+          "a000000152": "Discover", "a000000065": "JCB", "a000000333": "UnionPay",
+          "a000000277": "Interac", "a000000324": "Discover", "a000000042": "CB",
+          "a000000359": "Girocard", "a000000677": "Debit Network Alliance", "a000000384": "eftpos",
+          "a000000620": "MIR", "a000000291": "PayPass", "a000000098": "US Debit (Visa)",
+          "a000000305": "Maestro", "d276000025": "Girocard"}
+
+seq = 0
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+# ----------------------------------------------------------------- netlink --
+
+def attr(t, data):
+    n = 4 + len(data)
+    return struct.pack("HH", n, t) + data + bytes((4 - n % 4) % 4)
+
+
+def attrs(buf):
+    out, i = {}, 0
+    while i + 4 <= len(buf):
+        n, t = struct.unpack_from("HH", buf, i)
+        if n < 4:
+            break
+        out[t & 0x3FFF] = buf[i + 4:i + n]
+        i += (n + 3) & ~3
+    return out
+
+
+def u32(a, key, default=0):
+    return struct.unpack("I", a[key][:4])[0] if key in a and len(a[key]) >= 4 else default
+
+
+class Genl:
+    def __init__(self):
+        self.sk = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_GENERIC)
+        self.sk.bind((0, 0))
+        err, res = self.request(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, attr(CTRL_ATTR_FAMILY_NAME, b"nfc\0"))
+        if err or not res:
+            raise SystemExit("nfc netlink family not found (is the nfc module loaded?)")
+        self.fam = struct.unpack("H", res[0][CTRL_ATTR_FAMILY_ID][:2])[0]
+        for g in attrs(res[0].get(CTRL_ATTR_MCAST_GROUPS, b"")).values():
+            ga = attrs(g)
+            if ga.get(1, b"").rstrip(b"\0") == b"events":
+                self.sk.setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, struct.unpack("I", ga[2][:4])[0])
+        self.pending = []
+
+    def send(self, fam, cmd, payload=b"", flags=NLM_F_REQUEST | NLM_F_ACK):
+        global seq
+        seq += 1
+        body = struct.pack("BBH", cmd, 1, 0) + payload
+        self.sk.send(struct.pack("IHHII", 16 + len(body), fam, flags, seq, 0) + body)
+        return seq
+
+    def read(self, timeout):
+        """Return a list of (type, seq, cmd, attrs, err) messages received."""
+        if not select.select([self.sk], [], [], timeout)[0]:
+            return []
+        data = self.sk.recv(65536)
+        out, i = [], 0
+        while i + 16 <= len(data):
+            n, typ, flags, s, pid = struct.unpack_from("IHHII", data, i)
+            msg = data[i + 16:i + n]
+            if typ == NLMSG_ERROR:
+                out.append((typ, s, None, None, -struct.unpack_from("i", msg)[0]))
+            elif typ == NLMSG_DONE:
+                out.append((typ, s, None, None, 0))
+            else:
+                out.append((typ, s, msg[0], attrs(msg[4:]), 0))
+            i += (n + 3) & ~3
+        return out
+
+    def request(self, fam, cmd, payload=b"", dump=False):
+        """Send a command and wait for its ack/dump; return (error, [attr dicts]).
+
+        Events that arrive meanwhile are queued in self.pending."""
+        s = self.send(fam, cmd, payload, NLM_F_REQUEST | (NLM_F_DUMP if dump else NLM_F_ACK))
+        out, end = [], time.monotonic() + 3
+        while time.monotonic() < end:
+            for typ, ms, c, a, err in self.read(0.5):
+                if ms != s:
+                    if typ != NLMSG_ERROR and typ != NLMSG_DONE:
+                        self.pending.append((c, a))
+                    continue
+                if typ == NLMSG_ERROR:
+                    return err, out
+                if typ == NLMSG_DONE:
+                    return 0, out
+                out.append(a)
+                if not dump:
+                    return 0, out
+        return errno.ETIMEDOUT, out
+
+    def events(self, timeout):
+        """Yield (cmd, attrs) events, queued ones first."""
+        while self.pending:
+            yield self.pending.pop(0)
+        for typ, ms, c, a, err in self.read(timeout):
+            if typ not in (NLMSG_ERROR, NLMSG_DONE):
+                yield c, a
+
+
+# ---------------------------------------------------------- data exchange --
+
+class sockaddr_nfc(ctypes.Structure):
+    _fields_ = [("sa_family", ctypes.c_ushort), ("dev_idx", ctypes.c_uint),
+                ("target_idx", ctypes.c_uint), ("nfc_protocol", ctypes.c_uint)]
+
+
+libc = ctypes.CDLL(None, use_errno=True)
+
+
+class Target:
+    """A raw NFC socket bound to an activated target (Python can't connect()
+    AF_NFC itself, so the connect goes through libc)."""
+
+    def __init__(self, dev_idx, target_idx, protocol):
+        self.sk = socket.socket(AF_NFC, socket.SOCK_SEQPACKET, NFC_SOCKPROTO_RAW)
+        self.sk.settimeout(1.5)
+        sa = sockaddr_nfc(AF_NFC, dev_idx, target_idx, protocol)
+        if libc.connect(self.sk.fileno(), ctypes.byref(sa), ctypes.sizeof(sa)) != 0:
+            e = ctypes.get_errno()
+            self.sk.close()
+            raise OSError(e, "nfc connect: " + os.strerror(e))
+
+    def transceive(self, data):
+        self.sk.send(bytes(data))
+        rsp = self.sk.recv(1024)
+        if not rsp:
+            raise OSError(errno.ECONNRESET, "target lost")
+        return rsp
+
+    def close(self):
+        try:
+            self.sk.close()
+        except OSError:
+            pass
+
+
+def apdu(t, data):
+    """Send an APDU; return (status word, body)."""
+    r = t.transceive(data)
+    if len(r) < 2:
+        raise OSError(errno.EIO, "short APDU response")
+    return (r[-2] << 8) | r[-1], r[:-2]
+
+
+def tlvs(buf):
+    """Decode BER-TLV (as EMV uses it) into a flat list of (tag hex, value)."""
+    out, i = [], 0
+    while i < len(buf):
+        if buf[i] in (0x00, 0xFF):
+            i += 1
+            continue
+        start = i
+        i += 1
+        if buf[start] & 0x1F == 0x1F:
+            while i < len(buf) and buf[i] & 0x80:
+                i += 1
+            i += 1
+        tag = buf[start:i].hex()
+        if i >= len(buf):
+            break
+        n = buf[i]
+        i += 1
+        if n & 0x80:
+            k = n & 0x7F
+            n = int.from_bytes(buf[i:i + k], "big")
+            i += k
+        val = buf[i:i + n]
+        i += n
+        out.append((tag, val))
+        if buf[start] & 0x20:  # constructed: descend
+            out.extend(tlvs(val))
+    return out
+
+
+# ---------------------------------------------------------------- NDEF -------
+
+URI_PREFIXES = ["", "http://www.", "https://www.", "http://", "https://", "tel:", "mailto:",
+                "ftp://anonymous:anonymous@", "ftp://ftp.", "ftps://", "sftp://", "smb://", "nfs://",
+                "ftp://", "dav://", "news:", "telnet://", "imap:", "rtsp://", "urn:", "pop:", "sip:",
+                "sips:", "tftp:", "btspp://", "btl2cap://", "btgoep://", "tcpobex://", "irdaobex://",
+                "file://", "urn:epc:id:", "urn:epc:tag:", "urn:epc:pat:", "urn:epc:raw:", "urn:epc:",
+                "urn:nfc:"]
+
+
+def parse_ndef(msg):
+    """Decode an NDEF message into a list of records (dicts)."""
+    out, i = [], 0
+    while i < len(msg):
+        hdr = msg[i]
+        tnf = hdr & 7
+        sr, il = hdr & 0x10, hdr & 0x08
+        i += 1
+        tlen = msg[i]
+        i += 1
+        if sr:
+            plen = msg[i]
+            i += 1
+        else:
+            plen = int.from_bytes(msg[i:i + 4], "big")
+            i += 4
+        idlen = 0
+        if il:
+            idlen = msg[i]
+            i += 1
+        rtype = msg[i:i + tlen]
+        i += tlen
+        rid = msg[i:i + idlen]
+        i += idlen
+        payload = msg[i:i + plen]
+        i += plen
+        rec = {"tnf": tnf, "type": rtype.decode("latin-1")}
+        if rid:
+            rec["id"] = rid.decode("latin-1")
+        if tnf == 1 and rtype == b"T" and payload:
+            st = payload[0]
+            ll = st & 0x3F
+            enc = "utf-16" if st & 0x80 else "utf-8"
+            rec["lang"] = payload[1:1 + ll].decode("ascii", "replace")
+            rec["text"] = payload[1 + ll:].decode(enc, "replace")
+        elif tnf == 1 and rtype == b"U" and payload:
+            pre = URI_PREFIXES[payload[0]] if payload[0] < len(URI_PREFIXES) else ""
+            rec["uri"] = pre + payload[1:].decode("utf-8", "replace")
+        elif tnf == 1 and rtype == b"Sp":
+            rec["records"] = parse_ndef(payload)
+        elif tnf == 2:
+            rec["mime"] = rec["type"]
+            rec["data"] = payload.hex()
+            try:
+                rec["text"] = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        elif tnf == 3:
+            rec["uri"] = rec["type"]
+        elif tnf == 4:
+            rec["data"] = payload.hex()
+            if rtype == b"android.com:pkg":
+                rec["text"] = payload.decode("utf-8", "replace")
+        else:
+            rec["data"] = payload.hex()
+        out.append(rec)
+        if hdr & 0x40:  # ME: message end
+            break
+    return out
+
+
+def scan_tlvs(data):
+    """Find the NDEF TLV in a Type 2 tag's data area.
+
+    Returns (ndef bytes or None, need_more): need_more says the area read so
+    far ends before the message (or its terminator) does."""
+    i = 0
+    while i < len(data):
+        tag = data[i]
+        if tag == 0x00:
+            i += 1
+            continue
+        if tag == 0xFE:
+            return None, False
+        if i + 1 >= len(data):
+            return None, True
+        n, off = data[i + 1], i + 2
+        if n == 0xFF:
+            if i + 4 > len(data):
+                return None, True
+            n, off = int.from_bytes(data[i + 2:i + 4], "big"), i + 4
+        if len(data) < off + n:
+            return None, True
+        if tag == 0x03:
+            return data[off:off + n], False
+        i = off + n
+    return None, True
+
+
+def read_type2(t):
+    """NDEF from a Type 2 tag: page 3 is the capability container; the TLV
+    area starts at page 4. READ returns four pages."""
+    first = t.transceive(b"\x30\x03")
+    if len(first) < 16 or first[0] != 0xE1:
+        return {"kind": "tag", "note": "no NDEF capability container"}
+    size = first[2] * 8  # data area, bytes from page 4
+    data, page = first[4:], 7
+    while True:
+        ndef, need_more = scan_tlvs(data)
+        if ndef is not None or not need_more or (page - 4) * 4 >= size:
+            break
+        data += t.transceive(bytes([0x30, page]))
+        page += 4
+    if ndef is None:
+        return {"kind": "tag", "note": "empty (no NDEF message)"}
+    return {"kind": "tag", "ndef": parse_ndef(ndef)}
+
+
+def read_type4_ndef(t):
+    """NDEF from an ISO-DEP tag (Type 4): select the NDEF application, its
+    capability container, then the NDEF file. Returns None if there's none."""
+    sw, _ = apdu(t, bytes.fromhex("00A4040007D276000085010100"))
+    if sw != 0x9000:
+        return None
+    sw, _ = apdu(t, bytes.fromhex("00A4000C02E103"))
+    if sw != 0x9000:
+        return {"kind": "tag", "note": "NDEF app without capability container"}
+    sw, cc = apdu(t, bytes.fromhex("00B000000F"))
+    if sw != 0x9000 or len(cc) < 15:
+        return {"kind": "tag", "note": "unreadable capability container"}
+    max_le = max(int.from_bytes(cc[3:5], "big"), 16)
+    file_id = cc[9:11]
+    sw, _ = apdu(t, b"\x00\xA4\x00\x0C\x02" + file_id)
+    if sw != 0x9000:
+        return {"kind": "tag", "note": "NDEF file not selectable"}
+    sw, nlen = apdu(t, bytes.fromhex("00B0000002"))
+    if sw != 0x9000 or len(nlen) < 2:
+        return {"kind": "tag", "note": "unreadable NDEF length"}
+    n = int.from_bytes(nlen, "big")
+    if n == 0:
+        return {"kind": "tag", "note": "empty (no NDEF message)"}
+    data, off = b"", 2
+    chunk = min(max_le - 2, 0xF0, 253)
+    while len(data) < n:
+        want = min(chunk, n - len(data))
+        sw, part = apdu(t, bytes([0x00, 0xB0, off >> 8, off & 0xFF, want]))
+        if sw != 0x9000 or not part:
+            return {"kind": "tag", "note": "NDEF read failed at %d/%d" % (len(data), n)}
+        data += part
+        off += len(part)
+    return {"kind": "tag", "ndef": parse_ndef(data)}
+
+
+def read_ppse(t):
+    """The payment application directory (PPSE). Only the directory is read."""
+    sw, fci = apdu(t, bytes.fromhex("00A404000E325041592E5359532E444446303100"))
+    if sw != 0x9000:
+        return None
+    apps, cur = [], None
+    for tag, val in tlvs(fci):
+        if tag == "61":
+            cur = {}
+            apps.append(cur)
+        elif tag == "4f" and cur is not None:
+            cur["aid"] = val.hex().upper()
+            cur["brand"] = BRANDS.get(val[:5].hex(), "")
+        elif tag == "50" and cur is not None:
+            cur["label"] = val.decode("latin-1", "replace").strip()
+        elif tag == "87" and cur is not None:
+            cur["priority"] = val[0] if val else 0
+    apps = [a for a in apps if "aid" in a]
+    if not apps:
+        return {"kind": "payment", "note": "PPSE without applications"}
+    return {"kind": "payment", "apps": apps}
+
+
+def read_target(dev_idx, ev):
+    """Try the data-exchange reads that make sense for the target; never raise."""
+    protos = ev["protocol_ids"]
+    try:
+        if PROTO_ISO14443 in protos or PROTO_ISO14443_B in protos:
+            proto = PROTO_ISO14443 if PROTO_ISO14443 in protos else PROTO_ISO14443_B
+            t = Target(dev_idx, ev["target_idx"], proto)
+            try:
+                r = read_type4_ndef(t)
+                if r is None:
+                    r = read_ppse(t)
+                if r is None:
+                    r = {"kind": "iso-dep", "note": "no NDEF or payment application"}
+            finally:
+                t.close()
+            return r
+        if PROTO_MIFARE in protos and ev.get("sel_res") in ("00", ""):
+            t = Target(dev_idx, ev["target_idx"], PROTO_MIFARE)
+            try:
+                return read_type2(t)
+            finally:
+                t.close()
+        if PROTO_MIFARE in protos:
+            return {"kind": "mifare", "note": "MIFARE Classic (not read: sector keys needed)"}
+        if PROTO_FELICA in protos:
+            return {"kind": "felica"}
+        if PROTO_ISO15693 in protos:
+            return {"kind": "iso15693"}
+        if PROTO_JEWEL in protos:
+            return {"kind": "type1"}
+        if PROTO_NFC_DEP in protos:
+            return {"kind": "peer", "note": "NFC-DEP peer (phone in P2P mode)"}
+    except (OSError, socket.timeout) as e:
+        return {"kind": "unknown", "note": "read failed: %s" % e}
+    return {"kind": "unknown"}
+
+
+def describe(ev):
+    """A title and detail lines for the popup, from the event."""
+    kind = ev.get("kind", "unknown")
+    lines = []
+    if kind == "payment":
+        apps = ev.get("apps", [])
+        brands = sorted({a["brand"] for a in apps if a.get("brand")})
+        title = " / ".join(brands) if brands else "Payment card"
+        if ev.get("random_uid"):
+            title += " (phone wallet)"
+        for a in apps:
+            lines.append((a.get("label") or a.get("brand") or "Application") + "  " + a["aid"])
+    elif kind == "tag" and ev.get("ndef"):
+        recs = ev["ndef"]
+        title = "NFC tag"
+        for r in recs:
+            if "uri" in r:
+                title = "Link"
+                lines.append(r["uri"])
+            elif "text" in r:
+                title = "Text" if r.get("type") == "T" else r.get("mime") or r.get("type", "Record")
+                lines.append(r["text"])
+            elif "records" in r:
+                lines.append("Smart poster")
+                for s in r["records"]:
+                    lines.append("  " + (s.get("uri") or s.get("text") or s.get("type", "")))
+            else:
+                lines.append(r.get("type", "?") + " " + r.get("data", "")[:40])
+    elif kind == "tag":
+        title = "NFC tag"
+    elif kind == "felica":
+        title = "FeliCa card"
+    elif kind == "iso15693":
+        title = "ISO 15693 tag"
+    elif kind == "mifare":
+        title = "MIFARE Classic card"
+    elif kind == "peer":
+        title = "Phone (peer mode)"
+    elif ev.get("random_uid"):
+        title = "Phone"
+    else:
+        title = ev["tech"] + " target"
+    if ev.get("note"):
+        lines.append(ev["note"])
+    return title, lines
+
+
+# ---------------------------------------------------------------- daemon --
+
+class Daemon:
+    def __init__(self):
+        self.g = Genl()
+        self.dev_idx = None
+        self.dev_name = ""
+        self.clients = []
+        self.last_key = None
+        self.last_seen = 0.0
+        self.repoll_at = None
+        self.polling = False
+        self.stop = False
+        self.rearm = False
+        self.suspended = self.sleep_offset()
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        self.listener.bind(SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        self.listener.listen(8)
+        self.listener.setblocking(False)
+
+    @staticmethod
+    def sleep_offset():
+        # CLOCK_BOOTTIME keeps counting through suspend; CLOCK_MONOTONIC doesn't.
+        return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+
+    # -- device ---------------------------------------------------------
+    def find_device(self):
+        err, devs = self.g.request(self.g.fam, CMD_GET_DEVICE, dump=True)
+        for d in devs:
+            if ATTR_DEVICE_INDEX in d:
+                self.dev_idx = u32(d, ATTR_DEVICE_INDEX)
+                self.dev_name = d.get(ATTR_DEVICE_NAME, b"").rstrip(b"\0").decode()
+                return True
+        return False
+
+    def dev(self):
+        return attr(ATTR_DEVICE_INDEX, struct.pack("I", self.dev_idx))
+
+    def dev_up(self):
+        err, _ = self.g.request(self.g.fam, CMD_DEV_UP, self.dev())
+        if err and err != errno.EALREADY:
+            log("device up failed: " + os.strerror(err))
+            return False
+        return True
+
+    def start_poll(self):
+        # Reader protocols plus NFC-DEP target mode: the PN560 needs the
+        # listen phase this adds to see passive cards (plan 8b).
+        payload = self.dev() + attr(ATTR_IM_PROTOCOLS, struct.pack("I", ALL_IM)) \
+            + attr(ATTR_TM_PROTOCOLS, struct.pack("I", 1 << PROTO_NFC_DEP))
+        err, _ = self.g.request(self.g.fam, CMD_START_POLL, payload)
+        if err == errno.EBUSY:
+            self.g.request(self.g.fam, CMD_STOP_POLL, self.dev())
+            err, _ = self.g.request(self.g.fam, CMD_START_POLL, payload)
+        if err:
+            log("start poll failed: " + os.strerror(err))
+            self.polling = False
+            self.repoll_at = time.monotonic() + 2.0
+            return False
+        self.polling = True
+        self.repoll_at = None
+        return True
+
+    def stop_poll(self):
+        self.g.request(self.g.fam, CMD_STOP_POLL, self.dev())
+        self.polling = False
+
+    def shutdown(self):
+        if self.dev_idx is not None:
+            self.stop_poll()
+            self.g.request(self.g.fam, CMD_DEV_DOWN, self.dev())
+        self.broadcast({"event": "reader", "state": "stopped", "device": self.dev_name})
+        try:
+            os.unlink(SOCK_PATH)
+        except OSError:
+            pass
+
+    # -- clients --------------------------------------------------------
+    def accept(self):
+        try:
+            c, _ = self.listener.accept()
+        except OSError:
+            return
+        c.setblocking(False)
+        self.clients.append(c)
+        self.send_to(c, self.status())
+
+    def status(self):
+        return {"event": "reader", "state": "polling" if self.polling else "idle",
+                "device": self.dev_name, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+    def send_to(self, c, obj):
+        try:
+            c.send((json.dumps(obj) + "\n").encode())
+            return True
+        except OSError:
+            return False
+
+    def broadcast(self, obj):
+        for c in list(self.clients):
+            if not self.send_to(c, obj):
+                self.drop(c)
+
+    def drop(self, c):
+        try:
+            c.close()
+        except OSError:
+            pass
+        if c in self.clients:
+            self.clients.remove(c)
+
+    def service_clients(self):
+        for c in list(self.clients):
+            try:
+                if c.recv(4096) == b"":
+                    self.drop(c)
+            except BlockingIOError:
+                pass
+            except OSError:
+                self.drop(c)
+
+    # -- targets --------------------------------------------------------
+    def target_event(self, t):
+        protos = u32(t, ATTR_PROTOCOLS)
+        ids = [p for p in PROTO_NAMES if protos & (1 << p)]
+        uid = t.get(ATTR_NFCID1, b"") or t.get(ATTR_ISO15693_UID, b"")
+        sensf = t.get(ATTR_SENSF_RES, b"")
+        if not uid and sensf:
+            uid = sensf[:8]  # FeliCa IDm
+        ev = {"event": "card", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+              "device": self.dev_name, "target_idx": u32(t, ATTR_TARGET_INDEX),
+              "protocol_ids": ids, "protocols": [PROTO_NAMES[p] for p in ids],
+              "tech": PROTO_NAMES[ids[0]] if ids else hex(protos),
+              "uid": uid.hex(":"), "random_uid": len(uid) == 4 and uid[0] == 0x08,
+              "sens_res": t.get(ATTR_SENS_RES, b"").hex(), "sel_res": t.get(ATTR_SEL_RES, b"").hex()}
+        if t.get(ATTR_SENSB_RES):
+            ev["sensb_res"] = t[ATTR_SENSB_RES].hex()
+        if sensf:
+            ev["sensf_res"] = sensf.hex()
+        return ev
+
+    def targets_found(self):
+        err, targets = self.g.request(self.g.fam, CMD_GET_TARGET, self.dev(), dump=True)
+        targets = [t for t in targets if ATTR_TARGET_INDEX in t]
+        now = time.monotonic()
+        for t in targets:
+            ev = self.target_event(t)
+            key = "random" if ev["random_uid"] else ev["uid"] or "none"
+            repeat = key == self.last_key and now - self.last_seen < QUIET_SECS
+            self.last_key, self.last_seen = key, now
+            if repeat:
+                continue
+            ev.update(read_target(self.dev_idx, ev))
+            ev["title"], ev["lines"] = describe(ev)
+            del ev["protocol_ids"]
+            log("read: %s uid=%s %s%s" % (ev["title"], ev["uid"] or "-", ev["tech"],
+                                          (" | " + " | ".join(ev["lines"])) if ev["lines"] else ""))
+            self.broadcast(ev)
+            try:
+                with open(LAST_PATH + ".tmp", "w") as f:
+                    f.write(json.dumps(ev) + "\n")
+                os.replace(LAST_PATH + ".tmp", LAST_PATH)
+            except OSError as e:
+                log("cannot write %s: %s" % (LAST_PATH, e))
+        # The target stays activated until the next discovery: give the card a
+        # moment, then poll again (nci deactivates it first).
+        self.polling = False
+        self.repoll_at = time.monotonic() + REPOLL_DELAY
+
+    # -- main loop ------------------------------------------------------
+    def run(self):
+        signal.signal(signal.SIGTERM, lambda *a: setattr(self, "stop", True))
+        signal.signal(signal.SIGINT, lambda *a: setattr(self, "stop", True))
+        signal.signal(signal.SIGHUP, lambda *a: setattr(self, "rearm", True))
+        while not self.find_device():
+            log("waiting for an NFC device")
+            for cmd, a in self.g.events(5.0):
+                pass
+            if self.stop:
+                return
+        log("using %s (index %d)" % (self.dev_name, self.dev_idx))
+        if not self.dev_up():
+            raise SystemExit(1)
+        self.start_poll()
+        self.broadcast(self.status())
+        try:
+            while not self.stop:
+                if self.sleep_offset() - self.suspended > 2.0:
+                    self.suspended = self.sleep_offset()
+                    log("resumed from suspend")
+                    self.rearm = True
+                if self.rearm:
+                    self.rearm = False
+                    log("restarting discovery")
+                    self.stop_poll()
+                    self.start_poll()
+                    self.broadcast(self.status())
+                if self.repoll_at is not None and time.monotonic() >= self.repoll_at:
+                    self.start_poll()
+                timeout = 0.5
+                if self.repoll_at is not None:
+                    timeout = max(0.05, min(timeout, self.repoll_at - time.monotonic()))
+                try:
+                    r, _, _ = select.select([self.g.sk, self.listener] + self.clients, [], [], timeout)
+                except InterruptedError:
+                    continue
+                if self.listener in r:
+                    self.accept()
+                if any(c in r for c in self.clients):
+                    self.service_clients()
+                if self.g.sk in r or self.g.pending:
+                    for cmd, a in self.g.events(0):
+                        idx = u32(a, ATTR_DEVICE_INDEX, -1) if a else -1
+                        if cmd == EVENT_TARGETS_FOUND and idx == self.dev_idx:
+                            self.targets_found()
+                        elif cmd == EVENT_TARGET_LOST and idx == self.dev_idx:
+                            if not self.polling and self.repoll_at is None:
+                                self.repoll_at = time.monotonic()
+                        elif cmd == EVENT_DEVICE_REMOVED and idx == self.dev_idx:
+                            log("device removed; exiting")
+                            self.dev_idx = None
+                            self.broadcast({"event": "reader", "state": "gone", "device": self.dev_name})
+                            return
+        finally:
+            self.shutdown()
+
+
+if __name__ == "__main__":
+    os.makedirs(RUN_DIR, exist_ok=True)
+    Daemon().run()

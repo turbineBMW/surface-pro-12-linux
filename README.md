@@ -33,8 +33,10 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
   fetches the exact sources for the kernel being built (Arch `-archN` tags, or
   upstream stable tags for e.g. `linux-omarchy`), or uses a bundled `cache/`.
 - `userspace/` — `sp12-flex-pair` (Flex Keyboard Bluetooth pairing over the
-  wired OOB channel), reconnect-on-detach (udev rule + service) and the
-  libcamera software-ISP default (`environment.d`).
+  wired OOB channel), reconnect-on-detach (udev rule + service), the
+  libcamera software-ISP default (`environment.d`), and the NFC reader daemon
+  (`sp12-nfc`) with its Omarchy plugin (`omarchy/plugins/sp12.nfc`: chime and
+  popup on every read; `sp12-nfc plugin install`).
 - `pkg/` — PKGBUILDs: `limine` (patched, `epoch=1`), `sp12-modules-dkms`,
   `sp12-flex-tools`, `libcamera-sp12` (libcamera 0.7.2 + IMX681 support),
   `sp12-ish-firmware` (private, see below).

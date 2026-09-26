@@ -27,7 +27,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 2 | Rear camera, OV13858 | `OVTID858` `I2C3.CAMR` | **Works** (`0009`, `0011`) | `ov13858` + power patch |
 | 3 | Front camera, IMX681 | `SONY0681` `I2C1.CAMF` | **Works** (`0010`–`0016`, libcamera 0.7.2-4.2). Open: colour tuning, noise (soft ISP has no NR) | new `imx681` |
 | 4 | IR camera, VD55G0 + illuminator | `SMO55F0` `I2C3.CAM3`, I²C `0x60`, 1-lane CSI link 1, power via `ICL1` | **Works** (`0017`–`0022`): GREY 644×604 on `/dev/video8`, emitter strobes alternate frames; irlume next | `vd55g1` + VD55G0 |
-| 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works** (`0006`, stock nxp-nci core): phones, and contactless cards when polling includes a listen phase (initiator + NFC-DEP target, as Windows does). Reader-only polling misses cards (8b) | stock nxp-nci + `0006` |
+| 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works** (`0006`, stock nxp-nci core): phones, and contactless cards when polling includes a listen phase (initiator + NFC-DEP target, as Windows does). Reader-only polling misses cards (8b). Daemon + Omarchy plugin: 8b2 | stock nxp-nci + `0006`, tools 1.21 |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
 | 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency); keyboard wake and longer suspends still untested | |
@@ -758,6 +758,43 @@ mode (`70`).
 
 **Open:** an upstream note for PN560/PN7160 (reader-only discovery misses passive
 cards). A userspace consumer (neard isn't installed) must poll in dual mode.
+
+#### 8b2: NFC reader daemon and Omarchy plugin (tools 1.21, 2026-09-25)
+A userspace consumer for the reader, since neard isn't installed and the PN560 needs
+dual-mode polling.
+- **`sp12-nfc.service`** (`/usr/lib/sp12/sp12-nfc`, root: the NFC netlink commands
+  need `CAP_NET_ADMIN`; started by udev when `nfc0` appears): keeps the device up and
+  polling (all reader protocols plus NFC-DEP target mode), and on every target it
+  opens an `AF_NFC` `SOCK_SEQPACKET` socket (connect via ctypes, Python has no
+  `sockaddr_nfc`) to read what it can:
+  - Type 2 tags (NTAG, Ultralight): the NDEF message (text, URI, smart poster, MIME).
+  - ISO-DEP: NDEF Type 4 application, else the PPSE directory (brand from the
+    RID, label, AID). Only the directory is read: no PAN or records.
+  - FeliCa, ISO 15693, Type 1: identity only.
+  Events go out as JSON lines on `/run/sp12-nfc/events` (Unix stream socket, a
+  `reader` status line on connect) and the last read to `/run/sp12-nfc/last`. A
+  fixed UID seen again within 3 s is the same presence (no new event); random
+  ISO14443-A UIDs (`08:xx`, phones) are one presence while they keep appearing.
+  Discovery restarts after each read (0.6 s), on SIGHUP, and on resume (detected
+  by a CLOCK_BOOTTIME jump). The device is taken down on stop, so nxp-nci can be
+  removed afterwards.
+- **`sp12-nfc`** CLI: `watch [--json]`, `last`, `status`, `demo [kind]`, and
+  `plugin install|remove` (copies the plugin below into
+  `~/.config/omarchy/plugins/sp12.nfc` and enables it).
+- **Omarchy plugin `sp12.nfc`** (`userspace/omarchy/plugins/sp12.nfc`, shipped in
+  `/usr/share/sp12/omarchy/plugins`): a `service` that connects to the socket
+  (retry every 3 s; a repeat `connected = true` is a no-op in Quickshell, so it
+  toggles), plays `complete.oga` with `pw-play`, and shows a card at the top left
+  (next to the antenna, below the bar using the notification plugin's bar-size
+  lookup): title (brand, "Link", "Text", ...), technology and UID, then the lines.
+  Click or 8 s closes it. IPC: `omarchy-shell nfc show|close|last|state|debug`.
+  Settings are the properties at the top of `Service.qml`.
+- **Gotcha:** the shell hot-reloads a saved plugin but the QML engine keeps the
+  compiled component, so edits to a loaded `Service.qml` need `omarchy restart shell`.
+- **Verified:** the popup and chime via `sp12-nfc demo`. Card/phone reads through
+  the daemon: see the session notes below this line once tested.
+- **Next:** user scripts on reads, e.g. `~/.config/omarchy/hooks/nfc-read.d/` run by
+  the plugin with the event JSON on stdin (or `sp12-nfc watch --json | ...`).
 
 #### 8c: battery charge limit: done (sp12-modules 1.12, tools 1.11)
 `sp12-charge-limit 80` holds the battery at 80% (50-99, or `off` for adaptive). It's
