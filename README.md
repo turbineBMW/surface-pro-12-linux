@@ -81,6 +81,24 @@ The ISH image (`IshS_SI.bin`, SHA-256 `921e34f8…a8ea1`, platform `0004` = PTL 
 and is not redistributable. It is never committed here; an ISO built with
 `SP12_ISH_FW` must stay private.
 
+## License
+
+Everything written for this project (userspace tools, services, the Omarchy
+plugin, scripts, PKGBUILDs and docs) is under the MIT license, see `LICENSE`.
+Exceptions:
+
+- **Patches** are under the license of the project they patch: the Linux kernel
+  (`dkms/patches`, GPL-2.0-only), libcamera (`pkg/libcamera-sp12`,
+  LGPL-2.1-or-later), BlueZ (`pkg/bluez-sp12`, GPL-2.0-or-later) and Limine
+  (`limine/patches`, `pkg/limine`, BSD-2-Clause).
+- **Arch packaging:** `pkg/bluez-sp12` and `pkg/libcamera-sp12/PKGBUILD` derive
+  from Arch Linux's PKGBUILDs (0BSD, see `pkg/bluez-sp12/LICENSE`).
+- **`windows/BluetoothStack.wprp`** is Microsoft's, unmodified, from
+  [microsoft/busiotools](https://github.com/microsoft/busiotools) (MIT).
+- **Camera tuning values** (colour matrices, lens shading tables) in the libcamera
+  patches come from the camera modules' Windows tuning files, as noted in each
+  patch, for interoperability with this hardware.
+
 ## Credits
 
 SSAM registry, tablet-switch and camera enablement by zR-JB in

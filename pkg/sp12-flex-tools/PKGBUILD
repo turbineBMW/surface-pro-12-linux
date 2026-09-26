@@ -19,6 +19,7 @@ optdepends=('libcamera: cameras' 'pipewire-libcamera: cameras in PipeWire apps a
 
 package() {
 	local u="${startdir}/../../userspace"
+	install -Dm644 "${startdir}/../../LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 	install -Dm755 "$u/usr/local/bin/sp12-flex-pair" "${pkgdir}/usr/bin/sp12-flex-pair"
 	install -Dm755 "$u/usr/local/bin/sp12-pen-pair" "${pkgdir}/usr/bin/sp12-pen-pair"
 	install -Dm755 "$u/usr/local/bin/sp12-bt-import-windows" "${pkgdir}/usr/bin/sp12-bt-import-windows"
