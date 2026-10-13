@@ -1,3 +1,9 @@
+# When the Flex Keyboard is attached (its wired KIP HID endpoint appears), make
+# sure it is paired over Bluetooth, pairing over the wire if it is not or if
+# its bond stopped working because another host re-keyed it.
+ACTION=="add", SUBSYSTEM=="hid", ENV{HID_NAME}=="*045E:0C8B*", \
+  RUN+="/usr/bin/systemctl --no-block start sp12-flex-autopair.service"
+
 # When the Flex Keyboard's wired KIP HID endpoint goes away (detach), ask BlueZ
 # to connect it over Bluetooth.
 ACTION=="remove", SUBSYSTEM=="hid", ENV{HID_NAME}=="*045E:0C8B*", \

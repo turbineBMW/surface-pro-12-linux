@@ -8,7 +8,7 @@
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.22
+pkgver=1.25
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream, NFC reader"
 arch=('any')
@@ -31,6 +31,8 @@ package() {
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-keyboard-wake.rules"
 	install -Dm755 "$u/usr/local/libexec/sp12-flex-bt-autoconnect" \
 		"${pkgdir}/usr/lib/sp12/sp12-flex-bt-autoconnect"
+	install -Dm755 "$u/usr/local/libexec/sp12-flex-autopair" \
+		"${pkgdir}/usr/lib/sp12/sp12-flex-autopair"
 	install -Dm644 "$u/etc/udev/rules.d/99-sp12-flex-bt.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/99-sp12-flex-bt.rules"
 	install -Dm644 "$u/usr/lib/environment.d/60-sp12-libcamera.conf" \
@@ -66,4 +68,7 @@ package() {
 	sed 's|/usr/local/libexec/sp12-flex-bt-autoconnect|/usr/lib/sp12/sp12-flex-bt-autoconnect|' \
 		"$u/etc/systemd/system/sp12-flex-bt-connect.service" \
 		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-bt-connect.service"
+	sed 's|/usr/local/libexec/sp12-flex-autopair|/usr/lib/sp12/sp12-flex-autopair|' \
+		"$u/etc/systemd/system/sp12-flex-autopair.service" \
+		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-autopair.service"
 }

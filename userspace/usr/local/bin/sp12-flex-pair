@@ -150,6 +150,9 @@ def main():
     ap.add_argument("--status", action="store_true", help="read only, change nothing")
     ap.add_argument("--conn-params", action="store_true",
                     help="only store the fast connection interval for the paired keyboard")
+    ap.add_argument("--no-detach", action="store_true",
+                    help="pair while the keyboard stays attached (no detach prompt); "
+                         "this is what the auto-pair service uses")
     ap.add_argument("--wait", type=int, default=20)
     a = ap.parse_args()
     if os.geteuid() != 0:
@@ -208,12 +211,15 @@ def main():
 
     # No need to touch Secure Connections: with only a legacy TK registered for
     # this peer, the kernel stops requesting SC for it automatically.
-    print("\n" + "=" * 60)
-    print("  DETACH THE KEYBOARD NOW -- it uses the wire while attached")
-    print("=" * 60)
-    while wired_attached():
-        time.sleep(2)
-    print("detached; pairing ...")
+    if a.no_detach:
+        print("pairing while attached (no detach) ...")
+    else:
+        print("\n" + "=" * 60)
+        print("  DETACH THE KEYBOARD NOW -- it uses the wire while attached")
+        print("=" * 60)
+        while wired_attached():
+            time.sleep(2)
+        print("detached; pairing ...")
     time.sleep(2)
     paired = False
     for cap_io in ("3", "4"):
