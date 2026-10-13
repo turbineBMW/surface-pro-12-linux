@@ -199,11 +199,15 @@ class Target:
             raise OSError(e, "nfc connect: " + os.strerror(e))
 
     def transceive(self, data):
+        """Send a frame; return the target's response. The raw socket puts a
+        one-byte status header (0 on success) in front of every response."""
         self.sk.send(bytes(data))
         rsp = self.sk.recv(1024)
         if not rsp:
             raise OSError(errno.ECONNRESET, "target lost")
-        return rsp
+        if rsp[0] != 0:
+            raise OSError(errno.EIO, "exchange failed (status %d)" % rsp[0])
+        return rsp[1:]
 
     def close(self):
         try:
