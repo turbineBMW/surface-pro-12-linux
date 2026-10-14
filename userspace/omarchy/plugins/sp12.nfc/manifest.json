@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "sp12.nfc",
+  "name": "NFC reader",
+  "version": "1.0.0",
+  "author": "sp12",
+  "description": "Chimes and shows what the Surface Pro 12 NFC reader read (tags, cards, phones)",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

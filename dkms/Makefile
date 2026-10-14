@@ -4,6 +4,12 @@ KDIR ?= /lib/modules/$(KVER)/build
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/surface modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/bluetooth modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/input modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/nfc modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/media modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/bridge modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/ipu7 modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/power modules
 
 clean:
-	rm -rf surface bluetooth src
+	rm -rf surface bluetooth input nfc media bridge ipu7 power src

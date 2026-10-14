@@ -14,24 +14,32 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
 |---|---|---|
 | Flex Keyboard + touchpad (attached), hotplug | ✅ | SSAM registry entry `MSHW0743` (`dkms/`) |
 | Battery, AC, fan, temperatures, platform profiles | ✅ | same |
-| Tablet-mode switch (POS) | ✅ | zero-padded source-list fix (`dkms/`) |
-| Lid-open wake from s2idle | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`) |
+| Tablet-mode switch (POS) | ✅ | zero-padded source-list fix; source-ID caching stops a posture event storm (~13% CPU) (`dkms/`) |
+| Lid-open wake from s2idle | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`); S0ix reached |
+| Power / volume buttons | ✅ | `soc_button_array` probe-order fix (`dkms/`) |
+| NFC (NXP PN560) | partial | powers up and polls (`dkms/`); no tag detected yet (RF config) |
 | Flex Keyboard detached over Bluetooth | ✅ | LE legacy OOB SMP (`dkms/`) + `sp12-flex-pair` (`userspace/`) |
 | Accelerometer / ALS / auto-rotation | ✅ | Microsoft's ISH firmware (not redistributable, see below) |
 | Limine (Omarchy's bootloader) | ✅ with patches | NX_COMPAT + firmware-memory fix (`limine/`, `pkg/limine`) |
 | Limine `protocol: linux` | ❌ | freezes after handoff; `protocol: efi` / UKI works (see `docs/limine.md`) |
-| Cameras, physical buttons | upstream work | [linux-surface#2144](https://github.com/linux-surface/linux-surface/issues/2144) |
+| Rear (OV13858) + front (IMX681) cameras | ✅ | `ov13858` power, new `imx681`, `ipu-bridge` entries (`dkms/`) + patched libcamera (`pkg/libcamera-sp12`); PipeWire/browsers via libcamera |
+| IR camera (VD55G0) | ❌ | planned (`docs/peripheral-plan.md`) |
 
 ## Layout
 
 - `dkms/` — DKMS package `sp12-modules`: patched `surface_aggregator_registry`,
-  `surface_aggregator_tabletsw`, `surface_gpe` and `bluetooth`. `prepare-sources.sh`
+  `surface_aggregator_tabletsw`, `surface_gpe`, `bluetooth`, `soc_button_array` and
+  `nxp-nci_i2c`. `prepare-sources.sh`
   fetches the exact sources for the kernel being built (Arch `-archN` tags, or
   upstream stable tags for e.g. `linux-omarchy`), or uses a bundled `cache/`.
 - `userspace/` — `sp12-flex-pair` (Flex Keyboard Bluetooth pairing over the
-  wired OOB channel) and reconnect-on-detach (udev rule + service).
+  wired OOB channel), reconnect-on-detach (udev rule + service), the
+  libcamera software-ISP default (`environment.d`), and the NFC reader daemon
+  (`sp12-nfc`) with its Omarchy plugin (`omarchy/plugins/sp12.nfc`: chime and
+  popup on every read; `sp12-nfc plugin install`).
 - `pkg/` — PKGBUILDs: `limine` (patched, `epoch=1`), `sp12-modules-dkms`,
-  `sp12-flex-tools`, `sp12-ish-firmware` (private, see below).
+  `sp12-flex-tools`, `libcamera-sp12` (libcamera 0.7.2 + IMX681 support),
+  `sp12-ish-firmware` (private, see below).
 - `iso/` — builds an Omarchy ISO with all of the above in its offline mirror
   (`build-sp12-iso.sh`, on top of the official omarchy-iso build).
 - `limine/` — the Limine/PicoEFI fixes, debugging patches, the Project Mu QEMU
@@ -72,6 +80,24 @@ The ISH image (`IshS_SI.bin`, SHA-256 `921e34f8…a8ea1`, platform `0004` = PTL 
 [driver MSI](https://www.microsoft.com/en-us/download/details.aspx?id=108671)
 and is not redistributable. It is never committed here; an ISO built with
 `SP12_ISH_FW` must stay private.
+
+## License
+
+Everything written for this project (userspace tools, services, the Omarchy
+plugin, scripts, PKGBUILDs and docs) is under the MIT license, see `LICENSE`.
+Exceptions:
+
+- **Patches** are under the license of the project they patch: the Linux kernel
+  (`dkms/patches`, GPL-2.0-only), libcamera (`pkg/libcamera-sp12`,
+  LGPL-2.1-or-later), BlueZ (`pkg/bluez-sp12`, GPL-2.0-or-later) and Limine
+  (`limine/patches`, `pkg/limine`, BSD-2-Clause).
+- **Arch packaging:** `pkg/bluez-sp12` and `pkg/libcamera-sp12/PKGBUILD` derive
+  from Arch Linux's PKGBUILDs (0BSD, see `pkg/bluez-sp12/LICENSE`).
+- **`windows/BluetoothStack.wprp`** is Microsoft's, unmodified, from
+  [microsoft/busiotools](https://github.com/microsoft/busiotools) (MIT).
+- **Camera tuning values** (colour matrices, lens shading tables) in the libcamera
+  patches come from the camera modules' Windows tuning files, as noted in each
+  patch, for interoperability with this hardware.
 
 ## Credits
 

@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+# Surface Pro 12 (Intel): publish the ambient light level for user sessions.
+#
+# The ALS is an ISH HID sensor (hid-sensor-als). Its one-shot read
+# (in_illuminance_raw) returns a stale cached report, so sysfs polling and
+# iio-sensor-proxy's poll fallback always see 0 lux. Streaming works, the way
+# Windows reads it: change sensitivity 0 and the IIO buffer, one sample every
+# 0.75 s in light (1.5 s in the dark). iio-sensor-proxy can't be used because
+# its buffer probe gives up after 0.5 s.
+#
+# Writes "<lux> <unix time>" to /run/sp12-als/lux on every sample. The sensor
+# sits behind the display glass and is insensitive: a TV-lit room reads 0,
+# an overhead-lit room 5-20 lux.
+import glob
+import os
+import struct
+import sys
+import time
+
+OUT_DIR = os.environ.get("RUNTIME_DIRECTORY", "/run/sp12-als")
+OUT = os.path.join(OUT_DIR, "lux")
+STALL_SECS = 10
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def find_als():
+    for name in glob.glob("/sys/bus/iio/devices/iio:device*/name"):
+        try:
+            if open(name).read().strip() == "als":
+                return os.path.dirname(name)
+        except OSError:
+            pass
+    return None
+
+
+def put(path, value):
+    with open(path, "w") as f:
+        f.write(str(value))
+
+
+def read_float(path, default):
+    try:
+        return float(open(path).read())
+    except (OSError, ValueError):
+        return default
+
+
+def arm(dev):
+    scan = os.path.join(dev, "scan_elements")
+    put(os.path.join(dev, "buffer/enable"), 0)
+    for en in glob.glob(os.path.join(scan, "*_en")):
+        put(en, 1 if en.endswith("/in_illuminance_en") else 0)
+    for attr in ("in_illuminance_hysteresis", "in_illuminance_hysteresis_relative"):
+        p = os.path.join(dev, attr)
+        if os.path.exists(p):
+            put(p, 0)
+    put(os.path.join(dev, "buffer/enable"), 1)
+
+
+def disarm(dev):
+    try:
+        put(os.path.join(dev, "buffer/enable"), 0)
+    except OSError:
+        pass
+
+
+def publish(lux):
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("%.3f %.3f\n" % (lux, time.time()))
+    os.replace(tmp, OUT)
+
+
+def stream(dev):
+    scale = read_float(os.path.join(dev, "in_illuminance_scale"), 1.0)
+    offset = read_float(os.path.join(dev, "in_illuminance_offset"), 0.0)
+    node = "/dev/" + os.path.basename(dev)
+    arm(dev)
+    log("streaming %s (scale %g)" % (node, scale))
+    fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+    last = time.monotonic()
+    try:
+        import select
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        while True:
+            if not poller.poll(1000):
+                # A proxy probe or a resume can disable the buffer under us.
+                if time.monotonic() - last > STALL_SECS:
+                    log("no samples for %ds, re-arming" % STALL_SECS)
+                    arm(dev)
+                    last = time.monotonic()
+                continue
+            data = os.read(fd, 4096)
+            n = len(data) // 4
+            if n == 0:
+                continue
+            raw = struct.unpack_from("<i", data, (n - 1) * 4)[0]
+            publish(max(0.0, (raw + offset) * scale))
+            last = time.monotonic()
+    finally:
+        os.close(fd)
+        disarm(dev)
+
+
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
+    while True:
+        dev = find_als()
+        if not dev:
+            time.sleep(2)
+            continue
+        try:
+            stream(dev)
+        except OSError as e:
+            log("%s: %s" % (dev, e))
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

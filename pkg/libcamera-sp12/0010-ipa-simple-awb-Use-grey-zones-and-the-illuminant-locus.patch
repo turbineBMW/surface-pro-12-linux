@@ -1,0 +1,503 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 13:00:00 -0400
+Subject: [PATCH] ipa: simple: awb: Use grey zones and the illuminant locus
+
+Grey world over the whole frame lets the dominant colour of a scene set the
+white balance: on the Surface Pro 12 rear camera, a warm wooden floor and
+cardboard turned white paper cyan.
+
+Collect R, G and B sums over a 16x12 grid of zones in the software ISP
+statistics, next to the global sums. With an illuminant locus in the
+tuning file (the sensor's white point, R/G and B/G, per colour
+temperature), the AWB averages only the zones that could be grey: lit,
+unsaturated, and within `zoneDistance` of the locus, weighted by
+brightness. It falls back to the whole frame when fewer than 8 qualify.
+The estimate is then moved onto the locus, keeping up to `offLocus` of
+its distance from it (LED and fluorescent light sits off the curve), the
+colour temperature for the CCM comes from the locus instead of a generic
+sRGB estimate, and `speed` smooths changes between frames. Without a
+locus the algorithm is unchanged.
+
+The IMX681 and OV13858 loci come from the chromaticities in the CCM
+records of the modules' Windows tuning files. In blind comparisons the
+new AWB fixed the rear camera's cyan whites and tied with grey world on
+the front camera.
+---
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -43,6 +43,19 @@
+ 	 * \brief A histogram of luminance values of all the sampled pixels
+ 	 */
+ 	Histogram yHistogram;
++	/**
++	 * \brief Number of AWB zones across and down the stats window
++	 */
++	static constexpr unsigned int kAwbZonesX = 16;
++	static constexpr unsigned int kAwbZonesY = 12;
++	/**
++	 * \brief Sums of R, G and B (scaled like sum_) and the sample count of a zone
++	 */
++	using AwbZone = std::array<uint32_t, 4>;
++	/**
++	 * \brief Per-zone colour sums, row by row, for auto white balance
++	 */
++	std::array<AwbZone, kAwbZonesX * kAwbZonesY> awbZones;
+ };
+ 
+ } /* namespace libcamera */
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -11,6 +11,7 @@
+ 
+ #pragma once
+ 
++#include <algorithm>
+ #include <stdint.h>
+ #include <vector>
+ 
+@@ -67,6 +68,7 @@
+ 		    y >= (window_.y + window_.height))
+ 			return;
+ 
++		setZoneRow(y, statsBufferIndex);
+ 		(this->*stats0_)(src, stats_[statsBufferIndex]);
+ 	}
+ 
+@@ -79,6 +81,7 @@
+ 		    y >= (window_.y + window_.height))
+ 			return;
+ 
++		setZoneRow(y, statsBufferIndex);
+ 		(this->*stats2_)(src, stats_[statsBufferIndex]);
+ 	}
+ 
+@@ -104,6 +107,13 @@
+ 
+ 	void processBayerFrame2(MappedFrameBuffer &in);
+ 
++	void setZoneRow(unsigned int y, unsigned int statsBufferIndex)
++	{
++		zoneRow_[statsBufferIndex] =
++			std::min((y - window_.y) * SwIspStats::kAwbZonesY / window_.height,
++				 SwIspStats::kAwbZonesY - 1);
++	}
++
+ 	processFrameFn processFrame_;
+ 
+ 	/* Variables set by configure(), used every line */
+@@ -122,6 +132,10 @@
+ 	unsigned int sumShift_;
+ 
+ 	std::vector<SwIspStats> stats_;
++	/* AWB zone row of the line being processed, per stats buffer */
++	std::vector<unsigned int> zoneRow_;
++	/* AWB zone column of each sample in a line */
++	std::vector<uint8_t> zoneCol_;
+ 	SharedMemObject<SwIspStats> sharedStats_;
+ 	Benchmark bench_;
+ };
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -171,18 +171,30 @@
+ static constexpr unsigned int kGreenYMul = 150; /* 0.587 * 256 */
+ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ 
+-#define SWSTATS_START_LINE_STATS(pixel_t) \
+-	pixel_t r, g, g2, b;              \
+-	uint64_t yVal;                    \
+-                                          \
+-	uint64_t sumR = 0;                \
+-	uint64_t sumG = 0;                \
+-	uint64_t sumB = 0;
+-
+-#define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+-	sumR += r;                         \
+-	sumG += g;                         \
+-	sumB += b;                         \
++#define SWSTATS_START_LINE_STATS(pixel_t)                                    \
++	pixel_t r, g, g2, b;                                                 \
++	uint64_t yVal;                                                       \
++                                                                             \
++	uint64_t sumR = 0;                                                   \
++	uint64_t sumG = 0;                                                   \
++	uint64_t sumB = 0;                                                   \
++                                                                             \
++	SwIspStats::AwbZone *zones = stats.awbZones.data() +                 \
++				     zoneRow_[&stats - stats_.data()] *      \
++					     SwIspStats::kAwbZonesX;         \
++	const uint8_t *zoneCol = zoneCol_.data();
++
++#define SWSTATS_ACCUMULATE_LINE_STATS(div)                   \
++	sumR += r;                                           \
++	sumG += g;                                           \
++	sumB += b;                                           \
++	{                                                    \
++		SwIspStats::AwbZone &zone = zones[*zoneCol++]; \
++		zone[0] += r;                                \
++		zone[1] += g;                                \
++		zone[2] += b;                                \
++		zone[3]++;                                   \
++	}                                                    \
+                                            \
+ 	yVal = r * kRedYMul;               \
+ 	yVal += g * kGreenYMul;            \
+@@ -392,6 +404,7 @@
+ 	for (auto &s : stats_) {
+ 		s.sum_ = RGB<uint64_t>({ 0, 0, 0 });
+ 		s.yHistogram.fill(0);
++		s.awbZones.fill({});
+ 	}
+ }
+ 
+@@ -409,13 +422,20 @@
+ 	if (valid) {
+ 		sharedStats_->sum_ = RGB<uint64_t>({ 0, 0, 0 });
+ 		sharedStats_->yHistogram.fill(0);
++		sharedStats_->awbZones.fill({});
+ 		for (const auto &s : stats_) {
+ 			sharedStats_->sum_ += s.sum_;
+ 			for (unsigned int j = 0; j < SwIspStats::kYHistogramSize; j++)
+ 				sharedStats_->yHistogram[j] += s.yHistogram[j];
++			for (unsigned int j = 0; j < s.awbZones.size(); j++)
++				for (unsigned int c = 0; c < 4; c++)
++					sharedStats_->awbZones[j][c] += s.awbZones[j][c];
+ 		}
+ 
+ 		sharedStats_->sum_ >>= sumShift_;
++		for (SwIspStats::AwbZone &zone : sharedStats_->awbZones)
++			for (unsigned int c = 0; c < 3; c++)
++				zone[c] >>= sumShift_;
+ 	}
+ 
+ 	sharedStats_->valid = valid;
+@@ -469,6 +489,7 @@
+ {
+ 	stride_ = inputCfg.stride;
+ 	stats_.resize(statsBufferCount);
++	zoneRow_.assign(statsBufferCount, 0);
+ 
+ 	BayerFormat bayerFormat =
+ 		BayerFormat::fromPixelFormat(inputCfg.pixelFormat);
+@@ -570,6 +591,13 @@
+ 	window_.width = (window_.width > xShift_ ? window_.width - xShift_ : 0);
+ 	window_.width &= ~(patternSize_.width - 1);
+ 	window_.height &= ~(patternSize_.height - 1);
++
++	/* Every stats function samples one 2x2 block in every four pixels */
++	const unsigned int samples = (window_.width + 3) / 4;
++	zoneCol_.resize(samples + 1);
++	for (unsigned int i = 0; i <= samples; i++)
++		zoneCol_[i] = std::min(i * SwIspStats::kAwbZonesX / std::max(samples, 1u),
++				       SwIspStats::kAwbZonesX - 1);
+ }
+ 
+ void SwStatsCpu::processBayerFrame2(MappedFrameBuffer &in)
+--- a/src/ipa/simple/algorithms/awb.cpp
++++ b/src/ipa/simple/algorithms/awb.cpp
+@@ -7,6 +7,9 @@
+ 
+ #include "awb.h"
+ 
++#include <algorithm>
++#include <cmath>
++#include <limits>
+ #include <numeric>
+ #include <stdint.h>
+ 
+@@ -21,17 +24,111 @@
+ 
+ LOG_DEFINE_CATEGORY(IPASoftAwb)
+ 
++namespace {
++
++/* Zones darker than this fraction of the range are too noisy to use */
++constexpr float kMinZoneLevel = 0.04f;
++/* Fewer usable zones than this, and grey world is used */
++constexpr unsigned int kMinZones = 8;
++
++} /* namespace */
++
+ namespace ipa::soft::algorithms {
+ 
++/**
++ * \brief Read the optional illuminant locus
++ *
++ * Without tuning data the algorithm is plain grey world. With a `locus`, a
++ * list of { ct, r, b } giving the sensor's white point (R/G, B/G) at a colour
++ * temperature, the grey-world estimate is moved onto the nearest point of
++ * that curve, keeping at most `offLocus` of its distance from it (for
++ * fluorescent and LED tints), and the colour temperature is read from the
++ * curve instead of a generic sRGB estimate. `speed` (0..1) is the fraction
++ * of the way to a new estimate taken each frame. Only zones of the frame
++ * within `zoneDistance` of the locus count, when enough of them are.
++ */
++int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	if (tuningData.contains("locus")) {
++		for (const ValueNode &entry : tuningData["locus"].asList()) {
++			auto ct = entry["ct"].get<unsigned int>();
++			auto r = entry["r"].get<float>();
++			auto b = entry["b"].get<float>();
++			if (!ct || !r || !b || *r <= 0 || *b <= 0) {
++				LOG(IPASoftAwb, Error) << "Invalid AWB locus point";
++				return -EINVAL;
++			}
++			locus_.push_back({ *ct, *r, *b });
++		}
++
++		std::sort(locus_.begin(), locus_.end(),
++			  [](const LocusPoint &a, const LocusPoint &b) { return a.ct < b.ct; });
++		if (locus_.size() < 2) {
++			LOG(IPASoftAwb, Error) << "The AWB locus needs two points or more";
++			return -EINVAL;
++		}
++	}
++
++	offLocus_ = std::max(tuningData["offLocus"].get<float>().value_or(0.0f), 0.0f);
++	maxZoneDistance_ = tuningData["zoneDistance"].get<float>().value_or(0.1f);
++	speed_ = std::clamp(tuningData["speed"].get<float>().value_or(1.0f), 0.01f, 1.0f);
++
++	if (!locus_.empty())
++		LOG(IPASoftAwb, Info)
++			<< "AWB locus of " << locus_.size() << " points, "
++			<< locus_.front().ct << "-" << locus_.back().ct << " K";
++
++	return 0;
++}
++
+ int Awb::configure(IPAContext &context,
+ 		   [[maybe_unused]] const IPAConfigInfo &configInfo)
+ {
+ 	auto &gains = context.activeState.awb.gains;
+ 	gains = { { 1.0, 1.0, 1.0 } };
++	estimate_.reset();
+ 
+ 	return 0;
+ }
+ 
++/*
++ * Nearest point to (r, b) on the locus polyline, keeping up to offLocus of
++ * the distance from it, with the colour temperature of the nearest point.
++ */
++Awb::LocusPoint Awb::project(float r, float b, float offLocus) const
++{
++	LocusPoint best{ locus_.front().ct, locus_.front().r, locus_.front().b };
++	float bestDist = std::numeric_limits<float>::max();
++
++	for (unsigned int i = 0; i + 1 < locus_.size(); i++) {
++		const LocusPoint &p = locus_[i];
++		const LocusPoint &q = locus_[i + 1];
++		const float dr = q.r - p.r;
++		const float db = q.b - p.b;
++		const float len2 = dr * dr + db * db;
++		const float t = len2 > 0
++					? std::clamp(((r - p.r) * dr + (b - p.b) * db) / len2, 0.0f, 1.0f)
++					: 0.0f;
++		const float pr = p.r + t * dr;
++		const float pb = p.b + t * db;
++		const float dist = (r - pr) * (r - pr) + (b - pb) * (b - pb);
++		if (dist < bestDist) {
++			bestDist = dist;
++			best = { static_cast<unsigned int>(std::lround(p.ct + t * (static_cast<float>(q.ct) - p.ct))),
++				 pr, pb };
++		}
++	}
++
++	const float dist = std::sqrt(bestDist);
++	if (dist > 0) {
++		const float keep = std::min(dist, offLocus) / dist;
++		best.r += (r - best.r) * keep;
++		best.b += (b - best.b) * keep;
++	}
++
++	return best;
++}
++
+ void Awb::prepare(IPAContext &context,
+ 		  [[maybe_unused]] const uint32_t frame,
+ 		  IPAFrameContext &frameContext,
+@@ -73,19 +170,84 @@
+ 	 */
+ 	const RGB<uint64_t> sum = stats->sum_.max(offset + minValid) - offset;
+ 
+-	/*
+-	 * Calculate red and blue gains for AWB.
+-	 * Clamp max gain at 4.0, this also avoids 0 division.
+-	 */
+ 	auto &gains = context.activeState.awb.gains;
+-	gains = { {
+-		sum.r() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.r(),
+-		1.0,
+-		sum.b() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.b(),
+-	} };
+ 
+-	RGB<double> rgbGains{ { 1 / gains.r(), 1 / gains.g(), 1 / gains.b() } };
+-	context.activeState.awb.temperatureK = estimateCCT(rgbGains);
++	if (locus_.empty()) {
++		/*
++		 * Calculate red and blue gains for AWB.
++		 * Clamp max gain at 4.0, this also avoids 0 division.
++		 */
++		gains = { {
++			sum.r() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.r(),
++			1.0,
++			sum.b() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.b(),
++		} };
++
++		RGB<double> rgbGains{ { 1 / gains.r(), 1 / gains.g(), 1 / gains.b() } };
++		context.activeState.awb.temperatureK = estimateCCT(rgbGains);
++	} else {
++		/*
++		 * Average the zones that could be grey: lit, unsaturated, and
++		 * with a colour near the locus. Brighter zones weigh more, as
++		 * whites are the best reference. Too few of them, and the
++		 * whole frame (grey world) is used instead.
++		 */
++		double zoneR = 0, zoneG = 0, zoneB = 0;
++		unsigned int used = 0;
++		for (const SwIspStats::AwbZone &zone : stats->awbZones) {
++			if (!zone[3])
++				continue;
++
++			const float n = zone[3];
++			const float zr = zone[0] / n - blackLevel;
++			const float zg = zone[1] / n - blackLevel;
++			const float zb = zone[2] / n - blackLevel;
++			const float top = 250.0f - blackLevel;
++			if (zg < kMinZoneLevel * top || zr >= 0.95f * top ||
++			    zg >= 0.95f * top || zb >= 0.95f * top || zr <= 0 || zb <= 0)
++				continue;
++
++			const LocusPoint nearest = project(zr / zg, zb / zg, 0.0f);
++			const float dr = zr / zg - nearest.r;
++			const float db = zb / zg - nearest.b;
++			if (dr * dr + db * db > maxZoneDistance_ * maxZoneDistance_)
++				continue;
++
++			zoneR += zr * zg;
++			zoneG += zg * zg;
++			zoneB += zb * zg;
++			used++;
++		}
++
++		float r, b;
++		if (used >= kMinZones) {
++			r = zoneR / zoneG;
++			b = zoneB / zoneG;
++		} else {
++			r = static_cast<float>(sum.r()) / sum.g();
++			b = static_cast<float>(sum.b()) / sum.g();
++		}
++		const LocusPoint target = project(std::max(r, 0.1f), std::max(b, 0.1f), offLocus_);
++
++		if (!estimate_) {
++			estimate_ = target;
++		} else {
++			estimate_->r += (target.r - estimate_->r) * speed_;
++			estimate_->b += (target.b - estimate_->b) * speed_;
++			estimate_->ct = std::lround(estimate_->ct +
++						    (static_cast<float>(target.ct) - estimate_->ct) * speed_);
++		}
++
++		LOG(IPASoftAwb, Debug)
++			<< used << " grey zones, estimate " << r << ", " << b
++			<< " -> " << target.r << ", " << target.b << " at " << target.ct << " K";
++
++		gains = { { std::clamp(1.0f / estimate_->r, 0.25f, 4.0f),
++			    1.0f,
++			    std::clamp(1.0f / estimate_->b, 0.25f, 4.0f) } };
++		context.activeState.awb.temperatureK = estimate_->ct;
++	}
++
+ 	metadata.set(controls::ColourTemperature, context.activeState.awb.temperatureK);
+ 
+ 	LOG(IPASoftAwb, Debug)
+--- a/src/ipa/simple/algorithms/awb.h
++++ b/src/ipa/simple/algorithms/awb.h
+@@ -7,6 +7,9 @@
+ 
+ #pragma once
+ 
++#include <optional>
++#include <vector>
++
+ #include "algorithm.h"
+ 
+ namespace libcamera {
+@@ -19,6 +22,7 @@
+ 	Awb() = default;
+ 	~Awb() = default;
+ 
++	int init(IPAContext &context, const ValueNode &tuningData) override;
+ 	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
+ 	void prepare(IPAContext &context,
+ 		     const uint32_t frame,
+@@ -29,6 +33,22 @@
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+ 		     ControlList &metadata) override;
++
++private:
++	/* Sensor white point (R/G, B/G) of an illuminant */
++	struct LocusPoint {
++		unsigned int ct;
++		float r;
++		float b;
++	};
++
++	LocusPoint project(float r, float b, float offLocus) const;
++
++	std::vector<LocusPoint> locus_;
++	float offLocus_ = 0.0f;
++	float maxZoneDistance_ = 0.1f;
++	float speed_ = 1.0f;
++	std::optional<LocusPoint> estimate_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+--- a/src/ipa/simple/data/imx681.yaml
++++ b/src/ipa/simple/data/imx681.yaml
+@@ -8,7 +8,19 @@
+   # libcamera's 16-bit scale, where 64 << 6 is 4096.
+   - BlackLevel:
+       blackLevel: 4096
++  # Sensor white point (R/G, B/G) per colour temperature, from the chromaticity
++  # of the CCM records in imx681_MSHW0740_PTL.aiqb.
+   - Awb:
++      locus:
++        - { ct: 2300, r: 0.9845, b: 0.2899 }
++        - { ct: 2586, r: 0.8633, b: 0.3273 }
++        - { ct: 2736, r: 0.7400, b: 0.3355 }
++        - { ct: 3547, r: 0.5890, b: 0.4128 }
++        - { ct: 4701, r: 0.5336, b: 0.5353 }
++        - { ct: 5817, r: 0.4533, b: 0.6138 }
++        - { ct: 6859, r: 0.4252, b: 0.6775 }
++      offLocus: 0.06
++      speed: 0.2
+   # Colour correction matrices from the Windows tuning file for this module
+   # (imx681_MSHW0740_PTL.aiqb): the base (global) matrix of each of its seven
+   # illuminants (the file also carries 24 hue-sector matrices per illuminant).
+--- a/src/ipa/simple/data/ov13858.yaml
++++ b/src/ipa/simple/data/ov13858.yaml
+@@ -5,7 +5,18 @@
+ version: 1
+ algorithms:
+   - BlackLevel:
++  # Sensor white point (R/G, B/G) per colour temperature, from the chromaticity
++  # of the CCM records in OV13858_MSHW0741_PTL.aiqb.
+   - Awb:
++      locus:
++        - { ct: 2514, r: 1.0186, b: 0.4678 }
++        - { ct: 2848, r: 0.8768, b: 0.4779 }
++        - { ct: 2870, r: 0.8923, b: 0.5022 }
++        - { ct: 3786, r: 0.6950, b: 0.5891 }
++        - { ct: 5438, r: 0.5837, b: 0.7118 }
++        - { ct: 6366, r: 0.5122, b: 0.7691 }
++      offLocus: 0.06
++      speed: 0.2
+   # Colour correction matrices from the Windows tuning file for this module
+   # (OV13858_MSHW0741_PTL.aiqb): the base (global) matrix of each of its six
+   # illuminants (the file also carries 24 hue-sector matrices per illuminant).
+-- 
+2.53.0

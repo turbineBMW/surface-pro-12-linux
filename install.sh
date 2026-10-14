@@ -32,6 +32,10 @@ install -Dm755 "$u/usr/local/bin/sp12-flex-pair" /usr/local/bin/sp12-flex-pair
 install -Dm755 "$u/usr/local/libexec/sp12-flex-bt-autoconnect" /usr/local/libexec/sp12-flex-bt-autoconnect
 install -Dm644 "$u/etc/udev/rules.d/99-sp12-flex-bt.rules" /etc/udev/rules.d/99-sp12-flex-bt.rules
 install -Dm644 "$u/etc/systemd/system/sp12-flex-bt-connect.service" /etc/systemd/system/sp12-flex-bt-connect.service
+install -Dm644 "$u/usr/lib/environment.d/60-sp12-libcamera.conf" /etc/environment.d/60-sp12-libcamera.conf
+install -Dm755 "$u/usr/lib/sp12/sp12-ir-graph" /usr/local/lib/sp12/sp12-ir-graph
+sed 's|/usr/lib/sp12/sp12-ir-graph|/usr/local/lib/sp12/sp12-ir-graph|' "$u/usr/lib/systemd/system/sp12-ir-camera.service" > /etc/systemd/system/sp12-ir-camera.service
+install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-ir-camera.rules" /etc/udev/rules.d/70-sp12-ir-camera.rules
 systemctl daemon-reload
 udevadm control --reload
 

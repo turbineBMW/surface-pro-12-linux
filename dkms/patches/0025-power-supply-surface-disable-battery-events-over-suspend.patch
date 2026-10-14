@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 18:50:00 -0400
+Subject: [PATCH] power: supply: surface: Disable battery events over suspend
+
+During suspend the EC holds its events and raises the SSAM wake line
+instead. With SSAM wakeup enabled, so that the attached keyboard can wake
+the system, battery-category events then resume it too: on a Surface Pro
+12 (Intel) a battery update (BAT command 0x53) woke it within two minutes
+while charging.
+
+Unregister the battery and adapter event notifiers on suspend, which
+disables the BAT events at the EC once both are gone, and register them
+again on resume before the existing full recheck. With this, a charging
+Surface Pro 12 sleeps undisturbed (5 minutes, woken by the RTC), while a
+key press still wakes it.
+---
+--- a/drivers/power/supply/surface_battery.c
++++ b/drivers/power/supply/surface_battery.c
+@@ -173,6 +173,7 @@
+ 	struct spwr_bst bst;
+ 	u32 alarm;
+ 	bool has_charge_limit;
++	bool events_off;	/* Events disabled over suspend. */
+ 	u32 charge_limit;	/* Percent; 100 means adaptive charging. */
+ };
+ 
+@@ -936,11 +937,39 @@
+ 
+ /* -- Driver setup. --------------------------------------------------------- */
+ 
++/*
++ * Battery events (status and power updates, frequent while charging) raise the
++ * EC wake line during suspend, so keyboard wake would resume the system for
++ * each of them. Disable them over suspend; the full recheck on resume covers
++ * anything that changed.
++ */
++static int __maybe_unused surface_battery_suspend(struct device *dev)
++{
++	struct spwr_battery_device *bat = dev_get_drvdata(dev);
++	int status;
++
++	cancel_delayed_work_sync(&bat->update_work);
++
++	status = ssam_device_notifier_unregister(bat->sdev, &bat->notif);
++	if (status)
++		dev_warn(dev, "failed to disable battery events: %d\n", status);
++	bat->events_off = !status;
++
++	return 0;
++}
++
+ static int __maybe_unused surface_battery_resume(struct device *dev)
+ {
+ 	struct spwr_battery_device *bat = dev_get_drvdata(dev);
+ 	int status;
+ 
++	if (bat->events_off) {
++		status = ssam_device_notifier_register(bat->sdev, &bat->notif);
++		if (status)
++			dev_err(dev, "failed to re-enable battery events: %d\n", status);
++		bat->events_off = false;
++	}
++
+ 	/* Re-apply the charge limit in case the firmware lost it. */
+ 	if (bat->has_charge_limit) {
+ 		mutex_lock(&bat->lock);
+@@ -952,7 +981,7 @@
+ 
+ 	return spwr_battery_recheck_full(bat);
+ }
+-static SIMPLE_DEV_PM_OPS(surface_battery_pm_ops, NULL, surface_battery_resume);
++static SIMPLE_DEV_PM_OPS(surface_battery_pm_ops, surface_battery_suspend, surface_battery_resume);
+ 
+ static int surface_battery_probe(struct ssam_device *sdev)
+ {
+--- a/drivers/power/supply/surface_charger.c
++++ b/drivers/power/supply/surface_charger.c
+@@ -55,6 +55,7 @@
+ 	struct power_supply_desc psy_desc;
+ 
+ 	struct ssam_event_notifier notif;
++	bool events_off;	/* Events disabled over suspend. */
+ 
+ 	struct mutex lock;  /* Guards access to state below. */
+ 
+@@ -222,11 +223,38 @@
+ 
+ /* -- Driver setup. --------------------------------------------------------- */
+ 
++/*
++ * Battery-category events raise the EC wake line during suspend (see
++ * surface_battery). Disable them over suspend and recheck on resume.
++ */
++static int __maybe_unused surface_ac_suspend(struct device *dev)
++{
++	struct spwr_ac_device *ac = dev_get_drvdata(dev);
++	int status;
++
++	status = ssam_device_notifier_unregister(ac->sdev, &ac->notif);
++	if (status)
++		dev_warn(dev, "failed to disable adapter events: %d\n", status);
++	ac->events_off = !status;
++
++	return 0;
++}
++
+ static int __maybe_unused surface_ac_resume(struct device *dev)
+ {
+-	return spwr_ac_recheck(dev_get_drvdata(dev));
++	struct spwr_ac_device *ac = dev_get_drvdata(dev);
++	int status;
++
++	if (ac->events_off) {
++		status = ssam_device_notifier_register(ac->sdev, &ac->notif);
++		if (status)
++			dev_err(dev, "failed to re-enable adapter events: %d\n", status);
++		ac->events_off = false;
++	}
++
++	return spwr_ac_recheck(ac);
+ }
+-static SIMPLE_DEV_PM_OPS(surface_ac_pm_ops, NULL, surface_ac_resume);
++static SIMPLE_DEV_PM_OPS(surface_ac_pm_ops, surface_ac_suspend, surface_ac_resume);
+ 
+ static int surface_ac_probe(struct ssam_device *sdev)
+ {
+-- 
+2.53.0

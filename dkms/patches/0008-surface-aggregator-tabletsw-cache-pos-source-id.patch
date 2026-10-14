@@ -1,0 +1,58 @@
+Subject: platform/surface: tabletsw: cache the POS posture source ID
+
+On the Surface Pro 12 (Intel), a POS sources-list request (CID 0x01) makes
+the EC re-send the last posture-changed event (CID 0x03). The driver reads
+the sources list on every event, so each event triggers the next: the EC
+and host exchange about 1100 frames per second from boot, keeping the
+SSAM receiver threads at ~13% of a CPU. The replayed event carries the
+stale {source, old state, new state} of the last real transition.
+
+The sources list is static, so read it once and again only after a failed
+posture query. With this, the event rate drops from ~376/s to zero at
+rest, and keyboard detach/reattach is still reported (one event each).
+---
+--- a/drivers/platform/surface/surface_aggregator_tabletsw.c
++++ b/drivers/platform/surface/surface_aggregator_tabletsw.c
+@@ -44,6 +44,10 @@ struct ssam_tablet_sw {
+ 
+ 	struct ssam_tablet_sw_ops ops;
+ 	struct ssam_event_notifier notif;
++
++	/* POS only: posture source ID, cached to avoid re-reading the list. */
++	bool pos_source_valid;
++	u32 pos_source;
+ };
+ 
+ struct ssam_tablet_sw_desc {
+@@ -611,14 +615,27 @@ static int ssam_pos_get_posture(struct ssam_tablet_sw *sw, struct ssam_tablet_sw
+ 	u32 source_state;
+ 	int status;
+ 
+-	status = ssam_pos_get_source(sw, &source_id);
+-	if (status) {
+-		dev_err(&sw->sdev->dev, "failed to get posture source ID: %d\n", status);
+-		return status;
++	/*
++	 * Some devices (e.g. Surface Pro 12) answer a sources-list request by
++	 * re-sending the last posture-changed event. Re-reading the list for
++	 * every event then loops at hundreds of events per second, so read it
++	 * once and again only after a failed posture query.
++	 */
++	if (sw->pos_source_valid) {
++		source_id = sw->pos_source;
++	} else {
++		status = ssam_pos_get_source(sw, &source_id);
++		if (status) {
++			dev_err(&sw->sdev->dev, "failed to get posture source ID: %d\n", status);
++			return status;
++		}
++		sw->pos_source = source_id;
++		sw->pos_source_valid = true;
+ 	}
+ 
+ 	status = ssam_pos_get_posture_for_source(sw, source_id, &source_state);
+ 	if (status) {
++		sw->pos_source_valid = false;
+ 		dev_err(&sw->sdev->dev, "failed to get posture value for source %u: %d\n",
+ 			source_id, status);
+ 		return status;

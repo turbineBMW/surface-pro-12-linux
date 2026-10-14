@@ -1,0 +1,6 @@
+# Surface Pro 12 (Intel): the Flex Keyboard's touchpad over Bluetooth is the
+# same touchpad as when attached. systemd assumes Bluetooth touchpads are
+# external, and libinput then drops palm detection; mark it internal.
+# 60-sp12-flex-keyboard.quirks keeps it from being suspended in tablet mode.
+touchpad:bluetooth:v045ep0c7a:*
+ ID_INPUT_TOUCHPAD_INTEGRATION=internal

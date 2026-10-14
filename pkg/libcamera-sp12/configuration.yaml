@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: CC0-1.0
+# libcamera global configuration for the Surface Pro 12 (16 cores): four
+# soft ISP worker threads instead of two keep the CPU debayer, noise
+# reduction and lens shading well inside a 1080p30 frame time.
+%YAML 1.1
+---
+version: 1
+configuration:
+  software_isp:
+    threads: 4

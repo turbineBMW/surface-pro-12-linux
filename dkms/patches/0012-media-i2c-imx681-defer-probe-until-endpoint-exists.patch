@@ -1,0 +1,42 @@
+Subject: media: i2c: imx681: defer probe until the fwnode endpoint exists
+
+On ACPI systems ipu-bridge creates the sensor's endpoint when the IPU
+driver probes. If imx681 probes first it fails with -ENXIO ("no endpoint
+found in firmware node") and never retries, which leaves the front camera
+missing after boot depending on module load order. Return -EPROBE_DEFER
+instead, as ov2740 and other ipu-bridge sensors do.
+---
+--- a/drivers/media/i2c/imx681.c
++++ b/drivers/media/i2c/imx681.c
+@@ -603,11 +603,14 @@ static int imx681_parse_endpoint(struct imx681 *imx681)
+ 	struct fwnode_handle *ep;
+ 	int ret;
+ 
++	/*
++	 * On ACPI systems the endpoint is created by ipu-bridge when the IPU
++	 * driver probes, which can be after this driver; wait for it.
++	 */
+ 	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
+-	if (!ep) {
+-		dev_err(imx681->dev, "no endpoint found in firmware node\n");
+-		return -ENXIO;
+-	}
++	if (!ep)
++		return dev_err_probe(imx681->dev, -EPROBE_DEFER,
++				     "waiting for fwnode graph endpoint\n");
+ 
+ 	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
+ 	fwnode_handle_put(ep);
+@@ -685,10 +688,8 @@ static int imx681_probe(struct i2c_client *client)
+ 
+ 	/* Parse CSI-2 endpoint */
+ 	ret = imx681_parse_endpoint(imx681);
+-	if (ret) {
+-		dev_err(imx681->dev, "endpoint parse failed: %d\n", ret);
+-		return ret;
+-	}
++	if (ret)
++		return dev_err_probe(imx681->dev, ret, "endpoint parse failed\n");
+ 
+ 	/* Probe against the actual powered sensor, then hand ownership to RPM. */
+ 	ret = imx681_power_on(imx681->dev);

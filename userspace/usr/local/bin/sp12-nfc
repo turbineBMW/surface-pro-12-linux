@@ -1,0 +1,159 @@
+#!/usr/bin/python3
+"""Surface Pro 12 NFC reader: watch reads, show the last one, manage the
+Omarchy plugin.
+
+    sp12-nfc watch [--json]      print each read as it happens (Ctrl-C to stop)
+    sp12-nfc last [--json]       the last read
+    sp12-nfc status              is the reader polling?
+    sp12-nfc demo [kind]         show a sample read in the Omarchy plugin
+                                 (kinds: payment, link, text, phone, tag)
+    sp12-nfc plugin install      copy the Omarchy plugin into
+                                 ~/.config/omarchy/plugins/sp12.nfc and enable it
+    sp12-nfc plugin remove       disable and delete that copy
+
+The reads come from the sp12-nfc.service daemon (/run/sp12-nfc/events, one
+JSON object per line). Scripts can read the same socket, or /run/sp12-nfc/last.
+"""
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+
+RUN_DIR = "/run/sp12-nfc"
+SOCK = os.path.join(RUN_DIR, "events")
+LAST = os.path.join(RUN_DIR, "last")
+PLUGIN_ID = "sp12.nfc"
+PLUGIN_SRC = "/usr/share/sp12/omarchy/plugins/" + PLUGIN_ID
+PLUGIN_DST = os.path.expanduser("~/.config/omarchy/plugins/" + PLUGIN_ID)
+
+DEMOS = {
+    "payment": {"title": "Visa", "tech": "ISO14443-A", "uid": "02:5a:3c:7e:19:b4:00", "kind": "payment",
+                "lines": ["VISA CREDIT  A0000000031010"]},
+    "phone": {"title": "Mastercard (phone wallet)", "tech": "ISO14443-A", "uid": "08:3a:9c:51",
+              "random_uid": True, "kind": "payment", "lines": ["Mastercard  A0000000041010"]},
+    "link": {"title": "Link", "tech": "Type 2 (MIFARE)", "uid": "04:a2:2f:1a:8c:5e:80", "kind": "tag",
+             "lines": ["https://omarchy.org/"]},
+    "text": {"title": "Text", "tech": "Type 2 (MIFARE)", "uid": "04:a2:2f:1a:8c:5e:80", "kind": "tag",
+             "lines": ["Hello from an NTAG213"]},
+    "tag": {"title": "NFC tag", "tech": "Type 2 (MIFARE)", "uid": "04:a2:2f:1a:8c:5e:80", "kind": "tag",
+            "lines": ["empty (no NDEF message)"]},
+}
+
+
+def pretty(ev):
+    if ev.get("event") == "reader":
+        return "reader %s: %s" % (ev.get("device", ""), ev.get("state", ""))
+    if ev.get("event") != "card":
+        return json.dumps(ev)
+    out = "%s  %s  %s  uid %s" % (ev.get("time", "")[11:], ev.get("title", "?"), ev.get("tech", ""),
+                                  ev.get("uid") or "-")
+    for line in ev.get("lines", []):
+        out += "\n    " + line
+    return out
+
+
+def connect():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCK)
+    except OSError as e:
+        raise SystemExit("cannot reach the reader daemon at %s (%s); is sp12-nfc.service running?"
+                         % (SOCK, e.strerror))
+    return s
+
+
+def watch(as_json):
+    s = connect()
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                raise SystemExit("reader daemon closed the connection")
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if as_json:
+                    print(line.decode(), flush=True)
+                else:
+                    print(pretty(json.loads(line)), flush=True)
+    except KeyboardInterrupt:
+        pass
+
+
+def last(as_json):
+    try:
+        line = open(LAST).read().strip()
+    except OSError:
+        raise SystemExit("no read yet")
+    print(line if as_json else pretty(json.loads(line)))
+
+
+def status():
+    s = connect()
+    s.settimeout(2)
+    line = b""
+    while not line.endswith(b"\n"):
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        line += chunk
+    print(pretty(json.loads(line)))
+
+
+def shell_ipc(*args):
+    r = subprocess.run(["omarchy-shell", "nfc"] + list(args), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit("omarchy-shell nfc %s failed: %s" % (args[0], (r.stderr or r.stdout).strip()
+                                                              or "is the sp12.nfc plugin enabled?"))
+    return r.stdout.strip()
+
+
+def demo(kind):
+    if kind not in DEMOS:
+        raise SystemExit("unknown demo %r; one of: %s" % (kind, ", ".join(DEMOS)))
+    ev = dict(DEMOS[kind], event="card", time="demo", demo=True)
+    print(shell_ipc("show", json.dumps(ev)))
+
+
+def plugin(action):
+    if action == "install":
+        if not os.path.isdir(PLUGIN_SRC):
+            raise SystemExit("plugin source missing: " + PLUGIN_SRC)
+        os.makedirs(os.path.dirname(PLUGIN_DST), exist_ok=True)
+        if os.path.isdir(PLUGIN_DST):
+            shutil.rmtree(PLUGIN_DST)
+        shutil.copytree(PLUGIN_SRC, PLUGIN_DST)
+        subprocess.run(["omarchy", "plugin", "enable", PLUGIN_ID], check=False)
+        print("installed %s; try: sp12-nfc demo" % PLUGIN_DST)
+    elif action == "remove":
+        subprocess.run(["omarchy", "plugin", "disable", PLUGIN_ID], check=False)
+        shutil.rmtree(PLUGIN_DST, ignore_errors=True)
+        print("removed " + PLUGIN_DST)
+    else:
+        raise SystemExit(__doc__)
+
+
+def main(argv):
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
+    cmd = argv[0] if argv else "watch"
+    if cmd == "watch":
+        watch(as_json)
+    elif cmd == "last":
+        last(as_json)
+    elif cmd == "status":
+        status()
+    elif cmd == "demo":
+        demo(argv[1] if len(argv) > 1 else "payment")
+    elif cmd == "plugin":
+        plugin(argv[1] if len(argv) > 1 else "")
+    else:
+        print(__doc__.strip())
+        return 2 if cmd not in ("-h", "--help", "help") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

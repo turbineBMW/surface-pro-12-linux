@@ -1,0 +1,13 @@
+# xe reads its options from the initramfs, and 90-mkinitcpio-install.hook
+# doesn't watch modprobe.d: rebuild the UKI when sp12-display.conf changes.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modprobe.d/sp12-display.conf
+
+[Action]
+Description = Rebuilding the UKI for the SP12 display options...
+When = PostTransaction
+Exec = /usr/bin/limine-mkinitcpio
