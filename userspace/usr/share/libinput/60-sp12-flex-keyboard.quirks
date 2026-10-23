@@ -1,0 +1,22 @@
+# Surface Pro 12 (Intel) Flex Keyboard over Bluetooth (045E:0C7A, named
+# "bluez-hog-device"). Attached, it matches libinput's Microsoft Surface
+# Keyboard and Flex Keyboard Touchpad quirks by name and product; over
+# Bluetooth neither matches. Give it the same treatment, but keep it working
+# in tablet mode: detached is exactly when it is used, and libinput suspends
+# internal keyboards and touchpads while the tablet-mode switch is on.
+
+[SP12 Flex Keyboard (Bluetooth)]
+MatchBus=bluetooth
+MatchVendor=0x045E
+MatchProduct=0x0C7A
+MatchUdevType=keyboard
+AttrKeyboardIntegration=internal
+ModelTabletModeNoSuspend=1
+
+[SP12 Flex Keyboard Touchpad (Bluetooth)]
+MatchBus=bluetooth
+MatchVendor=0x045E
+MatchProduct=0x0C7A
+MatchUdevType=touchpad
+AttrEventCode=-BTN_RIGHT
+ModelTabletModeNoSuspend=1

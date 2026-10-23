@@ -1,0 +1,16 @@
+# Surface Pro 12: let the Flex Keyboard wake the system.
+#
+# Attached: the EC signals pending events on the SSAM wake line during suspend;
+# sp12-modules 1.13 keeps battery events off over suspend, so only input (keys,
+# touchpad, cover) wakes.
+ACTION=="add|bind", SUBSYSTEM=="serial", ATTR{modalias}=="acpi:MSHW0084:*", \
+  TEST=="power/wakeup", ATTR{power/wakeup}="enabled"
+
+
+
+# Bluetooth: sp12-modules 1.14 keeps links to WakeAllowed devices (the paired
+# keyboard) up over suspend, and bluez-sp12 (5.87-2.3) sends HID Suspend and
+# pauses the keyboard's battery and vendor status notifications for the sleep,
+# so only a key report wakes it.
+ACTION=="add|bind", SUBSYSTEM=="pci", DRIVER=="btintel_pcie", \
+  TEST=="power/wakeup", ATTR{power/wakeup}="enabled"

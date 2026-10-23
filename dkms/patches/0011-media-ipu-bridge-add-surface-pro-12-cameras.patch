@@ -1,0 +1,42 @@
+Subject: media: ipu-bridge: add the Surface Pro 12 (Intel) cameras
+
+- OVTID858 (OV13858, rear): mainline has no entry. It advertises both of
+  the driver's link frequencies, 540 and 270 MHz (linux-surface carries
+  it for the Surface Pro 9 with a count of 4 and one frequency;
+  zR-JB's linux-surface/kernel#174 fixes that).
+- SONY0681 (IMX681, front): 969.6 MHz (linux-surface/kernel#176).
+- The rear sensor is mounted upside down but firmware reports no
+  rotation; add the model to upside_down_sensor_dmi_ids
+  (linux-surface/kernel#175).
+---
+--- a/drivers/media/pci/intel/ipu-bridge.c
++++ b/drivers/media/pci/intel/ipu-bridge.c
+@@ -95,8 +95,12 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
+ 	IPU_SENSOR_CONFIG("OVTI5675", 1, 450000000),
+ 	/* Omnivision OV8856 */
+ 	IPU_SENSOR_CONFIG("OVTI8856", 3, 180000000, 360000000, 720000000),
++	/* Omnivision OV13858 */
++	IPU_SENSOR_CONFIG("OVTID858", 2, 540000000, 270000000),
+ 	/* Sony IMX471 */
+ 	IPU_SENSOR_CONFIG("SONY471A", 1, 200000000),
++	/* Sony IMX681 */
++	IPU_SENSOR_CONFIG("SONY0681", 1, 969600000),
+ 	/* Toshiba T4KA3 */
+ 	IPU_SENSOR_CONFIG("XMCC0003", 1, 321468000),
+ };
+@@ -134,6 +138,15 @@ static const struct dmi_system_id upside_down_sensor_dmi_ids[] = {
+ 		},
+ 		.driver_data = "OVTI02C1",
+ 	},
++	{
++		.matches = {
++			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Microsoft Corporation"),
++			DMI_EXACT_MATCH(DMI_PRODUCT_NAME,
++					"Surface Pro for Business 13in 12th Ed Intel"),
++		},
++		/* OVTID858 is the rear camera on this model. */
++		.driver_data = "OVTID858",
++	},
+ 	{} /* Terminating entry */
+ };
+ 

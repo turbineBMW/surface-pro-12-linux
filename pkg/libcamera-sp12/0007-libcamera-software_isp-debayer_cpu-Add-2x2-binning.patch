@@ -1,0 +1,269 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Thu, 24 Sep 2026 10:30:00 -0400
+Subject: [PATCH] libcamera: software_isp: debayer_cpu: Add 2x2 binning
+
+The CPU debayer can't scale: an output smaller than the sensor is cropped
+from the centre of the full-size debayered image. On sensors without a
+binned readout mode (the IMX681 in the Surface Pro 12 front camera) every
+1080p or 720p stream is a narrow crop at full per-pixel noise.
+
+When the output fits in half the input, 2x2-bin a window twice its size
+instead: each Bayer block becomes one pixel, the two green samples
+averaged, through the same white balance, CCM and gamma lookups. This keeps
+the field of view, averages noise and does a quarter of the work per
+output pixel. Statistics still run on the full-resolution window.
+
+Unpacked 8/10/12-bit standard Bayer orders only; other formats and larger
+outputs keep the existing path. Input lines are copied exactly (no
+padding), since a binned window can start at the buffer's first byte.
+
+---
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -50,6 +50,7 @@
+ 	void memcpyNextLine(const uint8_t *linePointers[]);
+ 	void process2(uint32_t frame, const uint8_t *src, uint8_t *dst);
+ 	void process4(uint32_t frame, const uint8_t *src, uint8_t *dst);
++	void processBinned(uint32_t frame, const uint8_t *src, uint8_t *dst);
+ 
+ 	/* Max. supported Bayer pattern height is 4, debayering this requires 5 lines */
+ 	static constexpr unsigned int kMaxLineBuffers = 5;
+@@ -428,6 +429,94 @@
+  * Return 0 on success, a negative errno value on failure
+  * (unsupported parameters).
+  */
++template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
++void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[])
++{
++	const pixel_t *l0 = reinterpret_cast<const pixel_t *>(src[0]);
++	const pixel_t *l1 = reinterpret_cast<const pixel_t *>(src[1]);
++	const int width = window_.width / 2;
++
++	for (int x = 0; x < width;) {
++		const int i = 2 * x;
++		int r, g, b;
++
++		if constexpr (order == BayerFormat::RGGB) {
++			r = l0[i];
++			g = (l0[i + 1] + l1[i]) / 2;
++			b = l1[i + 1];
++		} else if constexpr (order == BayerFormat::BGGR) {
++			b = l0[i];
++			g = (l0[i + 1] + l1[i]) / 2;
++			r = l1[i + 1];
++		} else if constexpr (order == BayerFormat::GRBG) {
++			g = (l0[i] + l1[i + 1]) / 2;
++			r = l0[i + 1];
++			b = l1[i];
++		} else {
++			g = (l0[i] + l1[i + 1]) / 2;
++			b = l0[i + 1];
++			r = l1[i];
++		}
++
++		STORE_PIXEL(b / (div), g / (div), r / (div))
++	}
++}
++
++#define BINNED_METHOD(order, pixel_t, div)                                                                        \
++	(addAlphaByte                                                                                                  \
++		 ? (ccmEnabled ? &DebayerCpu::debayerBinned2x2<true, true, order, pixel_t, div>                        \
++			       : &DebayerCpu::debayerBinned2x2<true, false, order, pixel_t, div>)                      \
++		 : (ccmEnabled ? &DebayerCpu::debayerBinned2x2<false, true, order, pixel_t, div>                       \
++			       : &DebayerCpu::debayerBinned2x2<false, false, order, pixel_t, div>))
++
++#define BINNED_METHODS(pixel_t, div)                                                    \
++	switch (bayerFormat.order) {                                                    \
++	case BayerFormat::BGGR:                                                         \
++		debayerBinned_ = BINNED_METHOD(BayerFormat::BGGR, pixel_t, div);        \
++		break;                                                                  \
++	case BayerFormat::GBRG:                                                         \
++		debayerBinned_ = BINNED_METHOD(BayerFormat::GBRG, pixel_t, div);        \
++		break;                                                                  \
++	case BayerFormat::GRBG:                                                         \
++		debayerBinned_ = BINNED_METHOD(BayerFormat::GRBG, pixel_t, div);        \
++		break;                                                                  \
++	case BayerFormat::RGGB:                                                         \
++		debayerBinned_ = BINNED_METHOD(BayerFormat::RGGB, pixel_t, div);        \
++		break;                                                                  \
++	default:                                                                        \
++		break;                                                                  \
++	}
++
++/*
++ * Pick the 2x2 binning function for an unpacked standard-order Bayer format,
++ * after the red/blue swap for BGR outputs has been applied to the order.
++ * Leaves debayerBinned_ null when binning isn't supported for the format.
++ */
++void DebayerCpu::setBinnedFunction(const BayerFormat &bayerFormat, bool addAlphaByte, bool ccmEnabled)
++{
++	debayerBinned_ = nullptr;
++
++	if (bayerFormat.packing != BayerFormat::Packing::None ||
++	    !isStandardBayerOrder(bayerFormat.order))
++		return;
++
++	switch (bayerFormat.bitDepth) {
++	case 8:
++		BINNED_METHODS(uint8_t, 1)
++		break;
++	case 10:
++		/* divide values by 4 for 10 -> 8 bpp value */
++		BINNED_METHODS(uint16_t, 4)
++		break;
++	case 12:
++		/* divide values by 16 for 12 -> 8 bpp value */
++		BINNED_METHODS(uint16_t, 16)
++		break;
++	default:
++		break;
++	}
++}
++
+ int DebayerCpu::getInputConfig(PixelFormat inputFormat, DebayerInputConfig &config)
+ {
+ 	BayerFormat bayerFormat =
+@@ -536,6 +625,7 @@
+ 
+ 	xShift_ = 0;
+ 	swapRedBlueGains_ = false;
++	debayerBinned_ = nullptr;
+ 
+ 	auto invalidFmt = []() -> int {
+ 		LOG(Debayer, Error) << "Unsupported input output format combination";
+@@ -593,6 +683,7 @@
+ 			break;
+ 		}
+ 		setupStandardBayerOrder(bayerFormat.order);
++		setBinnedFunction(bayerFormat, addAlphaByte, ccmEnabled);
+ 		return 0;
+ 	}
+ 
+@@ -696,12 +787,28 @@
+ 	 */
+ 	params_.gamma = 1.0;
+ 
+-	window_.x = ((inputCfg.size.width - outputCfg.size.width) / 2) &
++	/*
++	 * An output that fits in half the input is produced by 2x2 binning a
++	 * window twice its size, rather than by cropping it from the full-size
++	 * debayered image: it keeps the field of view and averages away noise.
++	 */
++	Size window = outputCfg.size;
++	binning_ = debayerBinned_ && inputConfig_.patternSize.height == 2 &&
++		   outputCfg.size.width * 2 <= inputCfg.size.width &&
++		   outputCfg.size.height * 2 <= inputCfg.size.height;
++	if (binning_)
++		window = outputCfg.size * 2;
++
++	window_.x = ((inputCfg.size.width - window.width) / 2) &
+ 		    ~(inputConfig_.patternSize.width - 1);
+-	window_.y = ((inputCfg.size.height - outputCfg.size.height) / 2) &
++	window_.y = ((inputCfg.size.height - window.height) / 2) &
+ 		    ~(inputConfig_.patternSize.height - 1);
+-	window_.width = outputCfg.size.width;
+-	window_.height = outputCfg.size.height;
++	window_.width = window.width;
++	window_.height = window.height;
++
++	LOG(Debayer, Info)
++		<< (binning_ ? "2x2 binning " : "debayering ") << window_
++		<< " to " << outputCfg.size;
+ 
+ 	/*
+ 	 * Set the stats window to the whole processed window. Its coordinates are
+@@ -844,10 +951,13 @@
+ 	/* Adjust src to top left corner of the window */
+ 	src += (window.y + yStart_) * debayer_->inputConfig_.stride +
+ 	       window.x * debayer_->inputConfig_.bpp / 8;
+-	/* Adjust dst for yStart_ */
+-	dst += yStart_ * debayer_->outputConfig_.stride;
+-
+-	if (debayer_->inputConfig_.patternSize.height == 2)
++	/* Adjust dst for yStart_ (window lines; binning halves them) */
++	dst += (debayer_->binning_ ? yStart_ / 2 : yStart_) *
++	       debayer_->outputConfig_.stride;
++
++	if (debayer_->binning_)
++		processBinned(frame, src, dst);
++	else if (debayer_->inputConfig_.patternSize.height == 2)
+ 		process2(frame, src, dst);
+ 	else
+ 		process4(frame, src, dst);
+@@ -858,6 +968,39 @@
+ 	debayer_->workPendingCv_.notify_one();
+ }
+ 
++void DebayerCpuThread::processBinned(uint32_t frame, const uint8_t *src, uint8_t *dst)
++{
++	unsigned int outputStride = debayer_->outputConfig_.stride;
++	unsigned int inputStride = debayer_->inputConfig_.stride;
++	unsigned int lineBytes = debayer_->window_.width * debayer_->inputConfig_.bpp / 8;
++	/* [0] previous- (unused by the stats), [1] current- and [2] next-line */
++	const uint8_t *linePointers[3];
++
++	for (unsigned int y = yStart_; y < yEnd_; y += 2) {
++		linePointers[1] = src;
++		linePointers[2] = src + inputStride;
++
++		/*
++		 * Copy exactly the pixels used: unlike the full debayer, binning
++		 * reads nothing outside the window, which may start at (0, 0).
++		 */
++		if (enableInputMemcpy_) {
++			for (unsigned int i = 0; i < 2; i++) {
++				uint8_t *buf = lineBuffers_[i].data() + lineBufferPadding_;
++				memcpy(buf, linePointers[i + 1], lineBytes);
++				linePointers[i + 1] = buf;
++			}
++		}
++		linePointers[0] = linePointers[1];
++
++		debayer_->stats_->processLine0(frame, y, linePointers, threadIndex_);
++		debayer_->debayerBinned(dst, linePointers + 1);
++
++		src += 2 * inputStride;
++		dst += outputStride;
++	}
++}
++
+ void DebayerCpuThread::process2(uint32_t frame, const uint8_t *src, uint8_t *dst)
+ {
+ 	unsigned int outputStride = debayer_->outputConfig_.stride;
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -85,6 +85,15 @@
+ 	void debayer1(uint8_t *dst, const uint8_t *src[]) { (this->*debayer1_)(dst, src); }
+ 	void debayer2(uint8_t *dst, const uint8_t *src[]) { (this->*debayer2_)(dst, src); }
+ 	void debayer3(uint8_t *dst, const uint8_t *src[]) { (this->*debayer3_)(dst, src); }
++	void debayerBinned(uint8_t *dst, const uint8_t *src[]) { (this->*debayerBinned_)(dst, src); }
++
++	/*
++	 * 2x2 binning: each 2x2 Bayer block becomes one output pixel, the two
++	 * green samples averaged. src[0] and src[1] point to the block's two
++	 * lines, at the left edge of the window.
++	 */
++	template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
++	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[]);
+ 
+ 	/* 8-bit raw bayer format */
+ 	template<bool addAlphaByte, bool ccmEnabled>
+@@ -123,6 +132,7 @@
+ 	static int getInputConfig(PixelFormat inputFormat, DebayerInputConfig &config);
+ 	static int getOutputConfig(PixelFormat outputFormat, DebayerOutputConfig &config);
+ 	int setupStandardBayerOrder(BayerFormat::Order order);
++	void setBinnedFunction(const BayerFormat &bayerFormat, bool addAlphaByte, bool ccmEnabled);
+ 	int setDebayerFunctions(PixelFormat inputFormat,
+ 				PixelFormat outputFormat,
+ 				bool ccmEnabled);
+@@ -153,6 +163,9 @@
+ 	debayerFn debayer1_;
+ 	debayerFn debayer2_;
+ 	debayerFn debayer3_;
++	debayerFn debayerBinned_;
++	/* Output is the window 2x2-binned, instead of debayered at full size */
++	bool binning_;
+ 	Rectangle window_;
+ 	std::unique_ptr<SwStatsCpu> stats_;
+ 	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */

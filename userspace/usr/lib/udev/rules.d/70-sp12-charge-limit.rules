@@ -1,0 +1,4 @@
+# Surface Pro 12: re-apply the saved battery charge limit (sp12-charge-limit)
+# when the battery appears; surface_battery starts in adaptive charging.
+ACTION=="add", SUBSYSTEM=="power_supply", KERNEL=="BAT1", TEST=="charge_control_end_threshold", \
+  RUN+="/usr/bin/sp12-charge-limit --apply"

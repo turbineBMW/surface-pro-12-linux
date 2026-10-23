@@ -1,0 +1,190 @@
+Subject: media: i2c: vd55g1: support the Surface Pro 12 (Intel) IR camera
+
+The Surface Pro 12 (Intel) describes its VD55G0 as ACPI SMO55F0
+(\_SB.PC00.I2C3.CAM3, 0x60, one lane) powered by an INT3472 (ICL1) that
+provides "avdd" and "dovdd" and the reset GPIO.
+
+- Match SMO55F0 and, on ACPI, request the INT3472 supply names.
+- Defer probe until ipu-bridge has created the endpoint.
+- Use the Surface Pro 12 Windows driver's 19.2 MHz mode table. Unlike the
+  Surface Pro 11 table it sets GPIO0/GPIO1 (0x0469/0x046a) to strobe,
+  which drives the IR illuminator; the firmware patch is identical.
+---
+diff --git a/drivers/media/i2c/vd55g0-win.h b/drivers/media/i2c/vd55g0-win.h
+--- a/drivers/media/i2c/vd55g0-win.h
++++ b/drivers/media/i2c/vd55g0-win.h
+@@ -1,8 +1,14 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ /*
+- * ST VD55G0 firmware patch and mode configuration, transplanted verbatim
+- * from the Surface Pro 11 Windows camx sensormodule configuration
+- * (com.surface.sensormodule.aux_vd55g0_MSHW0492.bin).
++ * ST VD55G0 firmware patch and mode configuration.
++ *
++ * The patch was transplanted verbatim from the Surface Pro 11 Windows camx
++ * sensormodule configuration (com.surface.sensormodule.aux_vd55g0_MSHW0492.bin);
++ * the Surface Pro 12 (Intel) Windows driver (vd55g0.sys) carries the same
++ * 552 bytes. The mode configuration is the Surface Pro 12 driver's 19.2 MHz
++ * table: unlike the Surface Pro 11 one it sets GPIO0/GPIO1 (0x0469/0x046a) to
++ * strobe, which drives the IR illuminator, and uses 644 lines of exposure at
++ * 4x analogue gain as its starting point.
+  *
+  * Patch: 552 bytes uploaded at 0x2000 while in READY_TO_BOOT, applied
+  * with BOOT=2 (load patch) then BOOT=1 (boot), both self-clearing.
+@@ -70,49 +76,49 @@ struct vd55g0_win_reg {
+ };
+ 
+ static const struct vd55g0_win_reg vd55g0_win_config[] = {
+-	{ 0x0220, 0x00 },
+-	{ 0x0221, 0xf8 },
+-	{ 0x0222, 0x24 },
+ 	{ 0x0223, 0x01 },
+-	{ 0x0224, 0x00 },
+-	{ 0x0225, 0x62 },
+-	{ 0x0226, 0x11 },
++	{ 0x0222, 0x24 },
++	{ 0x0221, 0xf8 },
++	{ 0x0220, 0x00 },
+ 	{ 0x0227, 0x32 },
+-	{ 0x0300, 0xb0 },
++	{ 0x0226, 0x11 },
++	{ 0x0225, 0x62 },
++	{ 0x0224, 0x00 },
+ 	{ 0x0301, 0x04 },
+-	{ 0x0302, 0x00 },
+-	{ 0x0303, 0x00 },
++	{ 0x0300, 0xb0 },
+ 	{ 0x0416, 0x40 },
+-	{ 0x0458, 0xa3 },
+-	{ 0x0459, 0x07 },
+ 	{ 0x044c, 0x02 },
+-	{ 0x044e, 0x64 },
+-	{ 0x044f, 0x00 },
+-	{ 0x044d, 0x00 },
++	{ 0x044d, 0x18 },
++	{ 0x044f, 0x02 },
++	{ 0x044e, 0x84 },
++	{ 0x0451, 0x04 },
+ 	{ 0x0450, 0x00 },
+-	{ 0x0451, 0x00 },
+-	{ 0x0467, 0x01 },
++	{ 0x0459, 0x07 },
++	{ 0x0458, 0x98 },
++	{ 0x045b, 0x00 },
++	{ 0x045a, 0x00 },
++	{ 0x045d, 0x02 },
++	{ 0x045c, 0x5b },
++	{ 0x045f, 0x00 },
++	{ 0x045e, 0x00 },
++	{ 0x0461, 0x02 },
++	{ 0x0460, 0x83 },
++	{ 0x0463, 0x00 },
++	{ 0x0462, 0x00 },
++	{ 0x0465, 0x02 },
++	{ 0x0464, 0x5b },
++	{ 0x0467, 0x02 },
+ 	{ 0x0468, 0x02 },
+-	{ 0x0469, 0x01 },
+-	{ 0x046a, 0x01 },
+-	{ 0x046d, 0x00 },
+-	{ 0x046e, 0x00 },
++	{ 0x0469, 0x02 },
++	{ 0x046a, 0x02 },
++	{ 0x0473, 0xfe },
++	{ 0x0472, 0x5b },
++	{ 0x0471, 0x00 },
++	{ 0x0470, 0x08 },
+ 	{ 0x0476, 0x00 },
+ 	{ 0x0477, 0x00 },
+ 	{ 0x0478, 0x00 },
+ 	{ 0x0479, 0x00 },
+-	{ 0x045e, 0x00 },
+-	{ 0x045f, 0x00 },
+-	{ 0x0460, 0x83 },
+-	{ 0x0461, 0x02 },
+-	{ 0x0462, 0x00 },
+-	{ 0x0463, 0x00 },
+-	{ 0x0464, 0x5b },
+-	{ 0x0465, 0x02 },
+-	{ 0x045a, 0x00 },
+-	{ 0x045b, 0x00 },
+-	{ 0x045c, 0x5b },
+-	{ 0x045d, 0x02 },
+ };
+ 
+ #endif /* __VD55G0_WIN_H */
+diff --git a/drivers/media/i2c/vd55g1.c b/drivers/media/i2c/vd55g1.c
+--- a/drivers/media/i2c/vd55g1.c
++++ b/drivers/media/i2c/vd55g1.c
+@@ -5,6 +5,7 @@
+  * Copyright (C) 2025 STMicroelectronics SA
+  */
+ 
++#include <linux/acpi.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+@@ -491,6 +492,17 @@ static const char * const vd55g1_supply_name[] = {
+ 	"vana",
+ };
+ 
++/*
++ * On ACPI platforms (Surface Pro 12 Intel) an INT3472 provides the rails as
++ * "dovdd" (I/O) and "avdd" (analogue); the core supply is not switched.
++ */
++static const char * const vd55g1_acpi_supply_name[] = {
++	"vcore",
++	"dovdd",
++	"avdd",
++};
++static_assert(ARRAY_SIZE(vd55g1_acpi_supply_name) == ARRAY_SIZE(vd55g1_supply_name));
++
+ enum vd55g1_hdr_mode {
+ 	VD55G1_NO_HDR,
+ 	VD55G1_HDR_SUB,
+@@ -2195,6 +2207,10 @@ static int vd55g1_parse_dt(struct vd55g1 *sensor)
+ 	endpoint = fwnode_graph_get_endpoint_by_id(dev_fwnode(sensor->dev),
+ 						   0, 0, 0);
+ 	if (!endpoint) {
++		/* On ACPI systems ipu-bridge creates it when the IPU probes. */
++		if (is_acpi_node(dev_fwnode(sensor->dev)))
++			return dev_err_probe(sensor->dev, -EPROBE_DEFER,
++					     "waiting for fwnode graph endpoint\n");
+ 		dev_err(sensor->dev, "Endpoint node not found\n");
+ 		return -EINVAL;
+ 	}
+@@ -2264,8 +2280,11 @@ static int vd55g1_get_regulators(struct vd55g1 *sensor)
+ {
+ 	unsigned int i;
+ 
++	const char * const *names = is_acpi_node(dev_fwnode(sensor->dev)) ?
++		vd55g1_acpi_supply_name : vd55g1_supply_name;
++
+ 	for (i = 0; i < ARRAY_SIZE(vd55g1_supply_name); i++)
+-		sensor->supplies[i].supply = vd55g1_supply_name[i];
++		sensor->supplies[i].supply = names[i];
+ 
+ 	return devm_regulator_bulk_get(sensor->dev,
+ 				       ARRAY_SIZE(vd55g1_supply_name),
+@@ -2389,6 +2408,13 @@ static const struct of_device_id vd55g1_dt_ids[] = {
+ };
+ MODULE_DEVICE_TABLE(of, vd55g1_dt_ids);
+ 
++static const struct acpi_device_id vd55g1_acpi_ids[] = {
++	/* Surface Pro 12 (Intel) IR camera */
++	{ "SMO55F0", VD55G1_MODEL_ID_VD55G0 },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(acpi, vd55g1_acpi_ids);
++
+ static const struct dev_pm_ops vd55g1_pm_ops = {
+ 	SET_RUNTIME_PM_OPS(vd55g1_power_off, vd55g1_power_on, NULL)
+ };
+@@ -2397,6 +2423,7 @@ static struct i2c_driver vd55g1_i2c_driver = {
+ 	.driver = {
+ 		.name  = "vd55g1",
+ 		.of_match_table = vd55g1_dt_ids,
++		.acpi_match_table = vd55g1_acpi_ids,
+ 		.pm = &vd55g1_pm_ops,
+ 	},
+ 	.probe = vd55g1_probe,

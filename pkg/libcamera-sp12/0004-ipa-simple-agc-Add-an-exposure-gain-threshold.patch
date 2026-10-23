@@ -1,0 +1,188 @@
+From b70b12b72387f73a44cefa6bea9451e332df2f6f Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Wed, 23 Sep 2026 15:09:49 -0400
+Subject: [PATCH] ipa: simple: agc: Add an exposure/gain threshold
+
+Let tuning files set exposureGainThreshold (microseconds): the AGC raises
+exposure up to it, then analogue gain up to the maximum, and only then
+exposure up to the sensor limit; decreasing undoes this in reverse order.
+Short exposures limit motion blur on sensors whose AGC would otherwise sit
+at a full-frame exposure before using any gain. Without the parameter the
+behaviour is unchanged.
+
+Use 1/60 s for the IMX681.
+---
+ src/ipa/simple/algorithms/agc.cpp | 94 ++++++++++++++++++++++++++-----
+ src/ipa/simple/algorithms/agc.h   |  7 +++
+ src/ipa/simple/data/imx681.yaml   |  2 +
+ 3 files changed, 89 insertions(+), 14 deletions(-)
+
+diff --git a/src/ipa/simple/algorithms/agc.cpp b/src/ipa/simple/algorithms/agc.cpp
+index a13a755..ccd4e21 100644
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -62,9 +62,51 @@ static constexpr float kExpProportionalGain = 0.04;
+ static constexpr float kExpMaxStep = 0.15;
+ 
+ Agc::Agc()
++	: exposureGainThresholdUs_(0), exposureThreshold_(0)
+ {
+ }
+ 
++/**
++ * \brief Read the optional exposureGainThreshold tuning parameter
++ *
++ * exposureGainThreshold (microseconds) is the exposure time the algorithm
++ * reaches before it starts raising the analogue gain. Exposure beyond it is
++ * used only once the gain is at its maximum. Keeping exposure short limits
++ * motion blur at the cost of some noise. Without it, exposure is raised to
++ * the sensor maximum before any gain, as before.
++ */
++int Agc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	auto threshold = tuningData["exposureGainThreshold"].get<double>();
++	if (threshold) {
++		if (*threshold <= 0) {
++			LOG(IPASoftExposure, Error)
++				<< "Invalid exposureGainThreshold " << *threshold;
++			return -EINVAL;
++		}
++		exposureGainThresholdUs_ = *threshold;
++	}
++
++	return 0;
++}
++
++int Agc::configure(IPAContext &context,
++		   [[maybe_unused]] const IPAConfigInfo &configInfo)
++{
++	const auto &agc = context.configuration.agc;
++
++	exposureThreshold_ = agc.exposureMax;
++	if (exposureGainThresholdUs_ > 0) {
++		double lineUs = agc.lineDuration.get<std::micro>();
++		int32_t lines = static_cast<int32_t>(exposureGainThresholdUs_ / lineUs);
++		exposureThreshold_ = std::clamp(lines, agc.exposureMin, agc.exposureMax);
++		LOG(IPASoftExposure, Debug)
++			<< "Raising gain beyond " << exposureThreshold_ << " lines";
++	}
++
++	return 0;
++}
++
+ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV)
+ {
+ 	int32_t &exposure = frameContext.sensor.exposure;
+@@ -84,24 +126,50 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, dou
+ 				-kExpMaxStep, kExpMaxStep);
+ 	float factor = 1.0f + step;
+ 
++	const auto &agc = context.configuration.agc;
++
++	/*
++	 * Exposure above the threshold while gain still has headroom (e.g. the
++	 * sensor's power-on exposure): move the excess into gain, keeping the
++	 * exposure * gain product.
++	 */
++	if (exposure > exposureThreshold_ && again < agc.againMax) {
++		double total = exposure * again;
++		again = std::min(agc.againMax, total / exposureThreshold_);
++		exposure = std::max(exposureThreshold_,
++				    static_cast<int32_t>(total / again));
++	}
++
+ 	if (factor > 1.0f) {
+-		/* Scene too dark: increase exposure first, then gain. */
+-		if (exposure < context.configuration.agc.exposureMax) {
++		/*
++		 * Scene too dark: increase exposure up to the threshold, then
++		 * gain, then exposure up to the maximum.
++		 */
++		if (exposure < exposureThreshold_) {
+ 			int32_t next = static_cast<int32_t>(exposure * factor);
+-			exposure = std::max(next, exposure + 1);
+-		} else {
++			exposure = std::min(std::max(next, exposure + 1), exposureThreshold_);
++		} else if (again < agc.againMax) {
+ 			double next = again * factor;
+-			if (next - again < context.configuration.agc.againMinStep)
+-				again += context.configuration.agc.againMinStep;
++			if (next - again < agc.againMinStep)
++				again += agc.againMinStep;
+ 			else
+ 				again = next;
++		} else {
++			int32_t next = static_cast<int32_t>(exposure * factor);
++			exposure = std::max(next, exposure + 1);
+ 		}
+ 	} else {
+-		/* Scene too bright: decrease gain first, then exposure. */
+-		if (again > context.configuration.agc.again10) {
++		/*
++		 * Scene too bright: undo in reverse order. Exposure above the
++		 * threshold first, then gain, then exposure.
++		 */
++		if (exposure > exposureThreshold_) {
++			int32_t next = static_cast<int32_t>(exposure * factor);
++			exposure = std::max(std::min(next, exposure - 1), exposureThreshold_);
++		} else if (again > agc.again10) {
+ 			double next = again * factor;
+-			if (again - next < context.configuration.agc.againMinStep)
+-				again -= context.configuration.agc.againMinStep;
++			if (again - next < agc.againMinStep)
++				again -= agc.againMinStep;
+ 			else
+ 				again = next;
+ 		} else {
+@@ -110,10 +178,8 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, dou
+ 		}
+ 	}
+ 
+-	exposure = std::clamp(exposure, context.configuration.agc.exposureMin,
+-			      context.configuration.agc.exposureMax);
+-	again = std::clamp(again, context.configuration.agc.againMin,
+-			   context.configuration.agc.againMax);
++	exposure = std::clamp(exposure, agc.exposureMin, agc.exposureMax);
++	again = std::clamp(again, agc.againMin, agc.againMax);
+ 
+ 	context.activeState.agc.exposure = exposure;
+ 	context.activeState.agc.again = again;
+diff --git a/src/ipa/simple/algorithms/agc.h b/src/ipa/simple/algorithms/agc.h
+index 112d9f5..c6c9ca1 100644
+--- a/src/ipa/simple/algorithms/agc.h
++++ b/src/ipa/simple/algorithms/agc.h
+@@ -19,6 +19,8 @@ public:
+ 	Agc();
+ 	~Agc() = default;
+ 
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
+ 	void process(IPAContext &context, const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+@@ -26,6 +28,11 @@ public:
+ 
+ private:
+ 	void updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV);
++
++	/* Exposure time (us) to reach before raising gain; 0 means no limit. */
++	double exposureGainThresholdUs_;
++	/* The same threshold in lines, for the current configuration. */
++	int32_t exposureThreshold_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+diff --git a/src/ipa/simple/data/imx681.yaml b/src/ipa/simple/data/imx681.yaml
+index f2bfac6..8310493 100644
+--- a/src/ipa/simple/data/imx681.yaml
++++ b/src/ipa/simple/data/imx681.yaml
+@@ -13,4 +13,6 @@ algorithms:
+   # enabling Ccm. The generic identity matrix is not a calibration.
+   - Adjust:
+   - Agc:
++      # Raise gain beyond 1/60 s of exposure to limit motion blur.
++      exposureGainThreshold: 16667
+ ...
+-- 
+2.55.0
+
