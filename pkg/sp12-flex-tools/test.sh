@@ -38,7 +38,27 @@ STUB
 cat >"$bin/btmgmt" <<'STUB'
 #!/bin/bash
 if [[ $1 == info ]]; then
-  printf 'hci0:\tPrimary controller\n\tcurrent settings: powered ssp br/edr le secure-conn \n'
+  settings='powered ssp br/edr le secure-conn ll-privacy'
+  # privacy-later holds "<checks before privacy comes on> <privacy value then>".
+  if [[ -e $BT_STATE/privacy-later ]]; then
+    read -r after hold <"$BT_STATE/privacy-later"
+    if (( after > 0 )); then echo "$((after - 1)) $hold" >"$BT_STATE/privacy-later"
+    else rm -f "$BT_STATE/privacy-later"; echo "$hold" >"$BT_STATE/privacy"
+    fi
+  fi
+  # privacy-cycle counts checks; every third of the first 200 sees privacy on.
+  if [[ -e $BT_STATE/privacy-cycle ]]; then
+    c=$(( $(<"$BT_STATE/privacy-cycle") + 1 )); echo "$c" >"$BT_STATE/privacy-cycle"
+    (( c <= 200 && c % 3 == 0 )) && settings+=' privacy'
+  fi
+  # privacy holds "on", or how many more checks see it on before it goes off.
+  if [[ -e $BT_STATE/privacy ]]; then
+    left=$(<"$BT_STATE/privacy")
+    if [[ $left == on ]]; then settings+=' privacy'
+    elif (( left > 0 )); then echo $((left - 1)) >"$BT_STATE/privacy"; settings+=' privacy'
+    fi
+  fi
+  printf 'hci0:\tPrimary controller\n\tcurrent settings: %s \n' "$settings"
   exit 0
 fi
 echo "btmgmt $*" >>"$BT_STATE/log"
@@ -94,6 +114,24 @@ flex_reset; flex_attach; flex_bond; : >"$scratch/bt/connectable"
 flex sp12-flex-autopair
 ! flex_did "pair --no-detach" || fail "a bond that connects on request is kept"
 
+# While a pen is pairing (sp12-pen-pair), privacy is on and the keyboard
+# cannot connect.
+flex_reset; flex_attach; flex_bond; echo on >"$scratch/bt/privacy"
+flex sp12-flex-autopair
+! flex_did "remove $keyboard" && ! flex_did "pair --no-detach" && ! flex_did "btmgmt power off" ||
+  fail "a bond is kept, and the radio left alone, while a pen is pairing"
+
+# Once the pairing ends the keyboard may no longer advertise; that is no
+# evidence against the bond.
+flex_reset; flex_attach; flex_bond; echo 2 >"$scratch/bt/privacy"
+flex sp12-flex-autopair
+! flex_did "remove $keyboard" && ! flex_did "pair --no-detach" && ! flex_did "btmgmt power off" ||
+  fail "a bond that does not connect right after a pen pairing is kept"
+
+flex_reset; flex_attach; echo 2 >"$scratch/bt/privacy"
+flex sp12-flex-autopair
+flex_did "pair --no-detach" || fail "a keyboard with no bond is paired once a pen pairing ends"
+
 flex_reset; mkdir -p "$scratch/hid/0019:045E:0C8B.0002"
 flex sp12-flex-autopair
 ! flex_did "pair --no-detach" || fail "without the kernel's pairing channel nothing is paired"
@@ -111,11 +149,44 @@ flex_reset; flex_bond
 flex sp12-flex-bt-autoconnect
 [[ -e $scratch/run/flex-needs-repair ]] || fail "a detached keyboard that never connects is marked for re-pairing"
 
+flex_reset; flex_bond; echo on >"$scratch/bt/privacy"
+flex sp12-flex-bt-autoconnect
+! flex_did "connect $keyboard" && [[ ! -e $scratch/run/flex-needs-repair ]] ||
+  fail "a keyboard detached while a pen is pairing is not marked for re-pairing"
+
+flex_reset; flex_bond; echo 2 >"$scratch/bt/privacy"
+flex sp12-flex-bt-autoconnect
+flex_did "connect $keyboard" && [[ ! -e $scratch/run/flex-needs-repair ]] ||
+  fail "a keyboard detached during a pen pairing is connected afterwards, and not marked if it stays away"
+
+# A pen pairing that begins between tries is waited out, then the tries resume.
+flex_reset; flex_bond; : >"$scratch/bt/connectable"; echo "2 2" >"$scratch/bt/privacy-later"
+flex sp12-flex-bt-autoconnect
+flex_did "connect $keyboard" ||
+  fail "a pen pairing that starts while the keyboard reconnects does not end the reconnect"
+
+flex_reset; flex_bond; echo "2 2" >"$scratch/bt/privacy-later"
+flex sp12-flex-bt-autoconnect
+flex_did "connect $keyboard" && ! flex_did "btmgmt power off" && [[ ! -e $scratch/run/flex-needs-repair ]] ||
+  fail "a keyboard that stays away after a pen pairing mid-reconnect is retried, with the radio left alone, and not marked"
+
+# A pen pairing that begins during the fifth try, just before the controller
+# reset, is not cut off by it.
+flex_reset; flex_bond; echo "7 on" >"$scratch/bt/privacy-later"
+flex sp12-flex-bt-autoconnect
+! flex_did "btmgmt power off" || fail "the controller is not reset while a pen is pairing"
+
+# Pen pairings that keep coming do not keep the job running.
+flex_reset; flex_bond; echo 0 >"$scratch/bt/privacy-cycle"
+flex sp12-flex-bt-autoconnect
+(( $(grep -c "^connect $keyboard" "$scratch/bt/log") <= 40 )) ||
+  fail "a reconnect gives up after a few pen pairings in a row"
+
 flex_reset; flex_attach; flex_bond
 flex sp12-flex-bt-autoconnect
 ! flex_did "connect $keyboard" || fail "an attached keyboard is not connected over Bluetooth"
 
-for tool in usr/local/bin/sp12-flex-pair usr/lib/systemd/system-sleep/sp12-touchpad-mode; do
+for tool in usr/local/bin/sp12-flex-pair usr/local/bin/sp12-pen-pair usr/lib/systemd/system-sleep/sp12-touchpad-mode; do
   python -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$u/$tool" ||
     fail "$tool is valid Python"
 done

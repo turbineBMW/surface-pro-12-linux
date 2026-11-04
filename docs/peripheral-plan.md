@@ -32,7 +32,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
 | 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency). Keyboard wake works attached and over Bluetooth (Phase 4, `0025`/`0026`, bluez-sp12) | |
 | 9 | Speakers | `rt1320` | **Fine, not reproduced** (2026-09-24): loud and clean at 100% and at low steps with bass-heavy tracks. #2144 had reported distortion at high volume and low loudness at low volume | |
-| 10 | Slim Pen tail button | BLE | **Works** (`sp12-pen-pair`): Meta+F20 / F19 / F18 for click / double click / hold | bluez |
+| 10 | Slim Pen tail button | BLE | **Works** (`sp12-pen-pair`, tools 1.28): Meta+F20 / F19 / F18 for click / double click / hold; any click reconnects, docked or not | bluez |
 | 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | Temperatures **work** via `surface_temp` (hwmon `surface_thermal`: RTS1–6, VTS1–4); the ACPI devices themselves stay unbound | Windows PEP/thermal framework |
 | 12 | HECI `e362` = **Pluton**, `e35d` = **Intel ISSEI** | PCI 00:13.0, 00:18.0 | unbound | out of scope |
 | 13 | Ambient light sensor (ISH virtual sensor, "INTEL / Model 0") | ISH `HID-SENSOR-200041` | **Works when streamed** (`sp12-als`, tools 1.5 → `/run/sp12-als/lux`). The one-shot read (`in_illuminance_raw`) returns a stale cached report, so sysfs polling and iio-sensor-proxy (whose 0.5 s buffer probe times out; the sensor reports every 0.75 s) see 0. Insensitive, as in Windows: TV-lit room 0 lux, overhead light 1–20, flashlight to ~2800. Reads 4006 K / x 0.380 / y 0.376 when too dark for colour | `hid-sensor-als`: correct |
@@ -465,6 +465,8 @@ Findings (2026-09-24):
   use those names; only F19 keeps its own name.
   Docking switches the pen to Windows' loosely coupled mode (radio silent): hold the
   tail button ~7 s after undocking to reconnect (automating that is Phase 8a).
+  **Since tools 1.28 a click reconnects** (see the privacy pairing under "Other
+  open items" in Phase 9).
 - ~~Camera colour (CCM)~~: done (libcamera-sp12 4.4, patches `0005`/`0006`). Both
   modules' Windows `.aiqb` files are CPFF containers (sections LCMC/LAIQ/LISP/LTHR,
   records `{u32 size, u16 id, u16 type}`; the parser in
@@ -873,11 +875,8 @@ autopair port in tools 1.25. Carried over:
   by the PKGBUILD's `check()`): autopair, reconnect-on-detach, the touchpad hook.
 
 Not carried:
-- **Privacy waits** in autopair/reconnect: they wait out `surface-pro-11-pen-pair`,
-  which turns LE privacy on while pairing (the pen click-reconnects only for a host
-  that sent it an identity key). `sp12-pen-pair` doesn't touch privacy. Port them
-  together with that pen pairing, which would also answer 8a's open "touch-to-pair
-  without Windows".
+- ~~**Privacy waits** in autopair/reconnect~~: carried in tools 1.28 with the
+  privacy pairing (Phase 9, "Other open items").
 - **Touchpad quirk:** the SP11 uses `AttrTPKComboLayout=below` for palm rejection over
   Bluetooth; here the hwdb marks the touchpad internal (palm detection on) and the
   quirk adds `ModelTabletModeNoSuspend`, which covers it.
@@ -1061,9 +1060,32 @@ cameras, IR, face unlock and the snoop fix all work.**
   sensor and a CSI-2 oops fix. Check whether it overlaps `0020`/`0021`.
 
 **Other open items carried forward:**
-- Port the SP11's native pen pairing (`surface-pro-11-pen-pair`: LE privacy on while
-  pairing, so the pen gets an identity key and click-reconnects). That answers 8a's
-  "touch-to-pair without Windows", and brings the autopair privacy waits (8e) with it.
+- ~~Port the SP11's native pen pairing~~: **done, tools 1.28** (2026-11-04).
+  - `sp12-pen-pair` is now the SP11's `surface-pro-11-pen-pair` (Python). It
+    forgets old pen bonds, turns LE privacy on (`sudo btmgmt`, with the radio
+    off) so BlueZ gives the pen an IRK and identity address, pairs Just Works
+    after you approve the device found, then turns privacy back off.
+    `sp12-pen-forget` forgets the pen.
+  - Result: after undocking, one click reconnects the pen and runs the action,
+    as on Windows. No 7 s hold, and no Windows key import
+    (`sp12-bt-import-windows`) needed.
+  - **Bug found and fixed:** turning privacy off power-cycles the radio. The
+    first run did that while BlueZ was still reading the pen's HID Report Map
+    on the pairing connection (`uhid_create() … Transport endpoint is not
+    connected`). BlueZ kept the truncated 309-byte map in memory and replayed it
+    on every reconnect, and the kernel rejected it ("item fetching failed at
+    offset 308/309"): the pen connected but its buttons did nothing until
+    bluetoothd restarted. `sp12-pen-pair` now waits for the pen's input devices
+    before turning privacy off. A clean re-pair worked at once.
+  - `sp12-flex-autopair` and `sp12-flex-bt-autoconnect` wait out a pen pairing
+    (privacy on): no stale-bond verdict, no repair marker, no controller reset
+    while it runs, and repeated pairings don't keep the reconnect job alive.
+    Ported with the SP11's tests (`pkg/sp12-flex-tools/test.sh`).
+  - **Touch-to-pair: won't do** (decided 2026-11-04). Windows derives the pen's
+    bond from the digitizer's pen ID with no pairing step. On the SP11 that
+    needed BlueZ/kernel Bluetooth changes the Linux Bluetooth maintainers
+    weren't keen on, and the SP11 and SP12 should behave the same. Pairing
+    stays manual (`sp12-pen-pair`), as on the SP11.
 - The upstream submissions under Post-work. `0008` is committed in `~/Projects/linux-tabletsw`
   and waits for the user's sign-off.
 
