@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 68f11be67b84205854f7c1d894a7d25577177976 Mon Sep 17 00:00:00 2001
 From: turbinebmw <turbine.bmw@gmail.com>
 Date: Thu, 24 Sep 2026 13:30:00 -0400
-Subject: [PATCH] libcamera: software_isp: Crop by default, raw TNR and chroma
- NR
+Subject: [PATCH 11/11] libcamera: software_isp: Crop by default, raw TNR and
+ chroma NR
 
 Three changes to the CPU debayer:
 
@@ -30,9 +30,15 @@ Three changes to the CPU debayer:
   speckle on flat areas drops by about 40%; a threshold of 20 halved it
   but flattened skin tones and lost a blind comparison, 8 won one.
 ---
+ src/libcamera/software_isp/debayer_cpu.cpp | 292 +++++++++++++++++++--
+ src/libcamera/software_isp/debayer_cpu.h   |  15 ++
+ 2 files changed, 288 insertions(+), 19 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_cpu.cpp b/src/libcamera/software_isp/debayer_cpu.cpp
+index b5bfdcb..65da14f 100644
 --- a/src/libcamera/software_isp/debayer_cpu.cpp
 +++ b/src/libcamera/software_isp/debayer_cpu.cpp
-@@ -48,12 +48,13 @@
+@@ -49,12 +49,13 @@ public:
  
  	void configure(unsigned int yStart, unsigned int yEnd);
  	void process(uint32_t frame, const uint8_t *src, uint8_t *dst);
@@ -47,10 +53,11 @@ Three changes to the CPU debayer:
  	void process2(uint32_t frame, const uint8_t *src, uint8_t *dst);
  	void process4(uint32_t frame, const uint8_t *src, uint8_t *dst);
  	void processBinned(uint32_t frame, const uint8_t *src, uint8_t *dst);
-@@ -653,6 +654,99 @@
+@@ -653,6 +654,99 @@ void DebayerCpu::buildLensShadingMap(unsigned int table)
+ 		<< t.whitePoint[0] << ", " << t.whitePoint[1] << ")";
  }
  
- /*
++/*
 + * LIBCAMERA_SOFTISP_CNR: "0" turns chroma noise reduction off; otherwise the
 + * threshold (default 8): neighbours whose chroma (B - Y, R - Y, 8-bit output
 + * levels, half resolution) differs by more than this are left out of the
@@ -60,7 +67,7 @@ Three changes to the CPU debayer:
 +{
 +	const char *env = utils::secure_getenv("LIBCAMERA_SOFTISP_CNR");
 +	const int threshold = env ? atoi(env) : 8;
-+	const unsigned int bpp = outputConfig_.bpp / 8;
++	const unsigned int bpp = outputBytesPerPixel_;
 +
 +	cnrEnabled_ = threshold > 0 && (bpp == 3 || bpp == 4) &&
 +		      outputSize.width >= 4 && outputSize.height >= 4;
@@ -143,11 +150,10 @@ Three changes to the CPU debayer:
 +	return wide;
 +}
 +
-+/*
+ /*
   * LIBCAMERA_SOFTISP_TNR: "0" turns temporal noise reduction off; otherwise
   * "alpha,base,slope" (defaults 64,24,3): alpha is the weight of a new frame
-  * in still areas (/256), and a change larger than base + slope * sqrt(value)
-@@ -664,7 +758,8 @@
+@@ -665,7 +759,8 @@ void DebayerCpu::configureTnr()
  	double base = 24.0, slope = 3.0;
  	const char *env = utils::secure_getenv("LIBCAMERA_SOFTISP_TNR");
  
@@ -157,7 +163,7 @@ Three changes to the CPU debayer:
  	if (env) {
  		if (!strcmp(env, "0"))
  			tnrEnabled_ = false;
-@@ -680,9 +775,12 @@
+@@ -681,9 +776,12 @@ void DebayerCpu::configureTnr()
  	}
  
  	tnrPrimed_ = false;
@@ -171,16 +177,16 @@ Three changes to the CPU debayer:
  
  	LOG(Debayer, Info)
  		<< "Temporal noise reduction " << (tnrEnabled_ ? "on" : "off")
-@@ -999,6 +1097,8 @@
+@@ -986,6 +1084,8 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
  	SizeRange outSizeRange = sizes(inputCfg.pixelFormat, inputCfg.size);
  	std::tie(outputConfig_.stride, outputConfig_.frameSize) =
  		strideAndFrameSize(outputCfg.pixelFormat, outputCfg.size);
 +	/* For the chroma noise reduction, which walks output pixels */
-+	getOutputConfig(outputCfg.pixelFormat, outputConfig_);
++	outputBytesPerPixel_ = PixelFormatInfo::info(outputCfg.pixelFormat).bitsPerPixel / 8;
  
  	if (!outSizeRange.contains(outputCfg.size) || outputConfig_.stride != outputCfg.stride) {
  		LOG(Debayer, Error)
-@@ -1030,7 +1130,7 @@
+@@ -1017,7 +1117,7 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
  	 * debayered image: it keeps the field of view and averages away noise.
  	 */
  	Size window = outputCfg.size;
@@ -189,7 +195,7 @@ Three changes to the CPU debayer:
  		   outputCfg.size.width * 2 <= inputCfg.size.width &&
  		   outputCfg.size.height * 2 <= inputCfg.size.height;
  	if (binning_)
-@@ -1048,6 +1148,7 @@
+@@ -1035,6 +1135,7 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
  		<< " to " << outputCfg.size;
  
  	configureTnr();
@@ -197,7 +203,7 @@ Three changes to the CPU debayer:
  
  	/*
  	 * LIBCAMERA_SOFTISP_LSC sets the lens-shading strength, as an exponent
-@@ -1106,7 +1207,7 @@
+@@ -1093,7 +1194,7 @@ void DebayerCpuThread::configure(unsigned int yStart, unsigned int yEnd)
  	lineBufferLength_ = debayer_->window_.width * inputConfig.bpp / 8 +
  			    2 * lineBufferPadding_;
  
@@ -206,7 +212,7 @@ Three changes to the CPU debayer:
  	if (copyLines_) {
  		for (unsigned int i = 0; i <= inputConfig.patternSize.height; i++)
  			lineBuffers_[i].resize(lineBufferLength_);
-@@ -1162,7 +1263,7 @@
+@@ -1143,7 +1244,7 @@ void DebayerCpuThread::setupInputMemcpy(const uint8_t *linePointers[])
  		memcpy(lineBuffers_[i].data(),
  		       linePointers[i + 1] - lineBufferPadding_,
  		       lineBufferLength_);
@@ -215,7 +221,7 @@ Three changes to the CPU debayer:
  		linePointers[i + 1] = lineBuffers_[i].data() + lineBufferPadding_;
  	}
  
-@@ -1191,29 +1292,176 @@
+@@ -1172,29 +1273,176 @@ void DebayerCpuThread::memcpyNextLine(const uint8_t *linePointers[])
  	memcpy(lineBuffers_[lineBufferIndex_].data(),
  	       linePointers[patternHeight] - lineBufferPadding_,
  	       lineBufferLength_);
@@ -281,7 +287,7 @@ Three changes to the CPU debayer:
 +{
 +	constexpr int kPad = 2;
 +	const unsigned int stride = debayer_->outputConfig_.stride;
-+	const unsigned int bpp = debayer_->outputConfig_.bpp / 8;
++	const unsigned int bpp = debayer_->outputBytesPerPixel_;
 +	/* Byte positions of red and blue in an output pixel */
 +	const unsigned int ri = debayer_->swapRedBlueGains_ ? 0 : 2;
 +	const unsigned int bi = 2 - ri;
@@ -404,7 +410,7 @@ Three changes to the CPU debayer:
  }
  
  /**
-@@ -1518,7 +1766,8 @@
+@@ -1499,7 +1747,8 @@ void DebayerCpu::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
  	metadata.timestamp = input->metadata().timestamp;
  
  	MappedFrameBuffer in(input, MappedFrameBuffer::MapFlag::Read);
@@ -414,7 +420,7 @@ Three changes to the CPU debayer:
  	if (!in.isValid() || !out.isValid()) {
  		LOG(Debayer, Error) << "mmap-ing buffer(s) failed";
  		metadata.status = FrameMetadata::FrameError;
-@@ -1543,6 +1792,11 @@
+@@ -1524,6 +1773,11 @@ void DebayerCpu::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
  		});
  	}
  
@@ -426,6 +432,8 @@ Three changes to the CPU debayer:
  	metadata.planes()[0].bytesused = out.planes()[0].size();
  
  	dmaSyncers.clear();
+diff --git a/src/libcamera/software_isp/debayer_cpu.h b/src/libcamera/software_isp/debayer_cpu.h
+index 4899cd3..8649f08 100644
 --- a/src/libcamera/software_isp/debayer_cpu.h
 +++ b/src/libcamera/software_isp/debayer_cpu.h
 @@ -13,6 +13,7 @@
@@ -436,7 +444,7 @@ Three changes to the CPU debayer:
  #include <vector>
  
  #include <libcamera/base/mutex.h>
-@@ -112,6 +113,9 @@
+@@ -113,6 +114,9 @@ private:
  					      float x, float y) const;
  	int temporalFilter(uint16_t &hist, int value);
  	void configureTnr();
@@ -446,7 +454,7 @@ Three changes to the CPU debayer:
  
  	/* 8-bit raw bayer format */
  	template<bool addAlphaByte, bool ccmEnabled>
-@@ -196,6 +200,16 @@
+@@ -196,6 +200,17 @@ private:
  	double tnrRawScale_;                       /* raw units per 10-bit unit */
  	bool tnrEnabled_;
  	bool tnrPrimed_;
@@ -454,6 +462,7 @@ Three changes to the CPU debayer:
 +	bool tnrRaw_;
 +
 +	/* Chroma noise reduction on the output, at half resolution */
++	unsigned int outputBytesPerPixel_;
 +	bool cnrEnabled_;
 +	int cnrThreshold_;
 +	Size cnrSize_;
@@ -464,4 +473,5 @@ Three changes to the CPU debayer:
  	/*
  	 * Lens shading on the binned path: the tuning file's tables, and for
 -- 
-2.53.0
+2.56.0
+

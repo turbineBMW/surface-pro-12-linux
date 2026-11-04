@@ -40,8 +40,9 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
   (`sp12-nfc`) with its Omarchy plugin (`omarchy/plugins/sp12.nfc`: chime and
   popup on every read; `sp12-nfc plugin install`).
 - `pkg/` — PKGBUILDs: `limine` (patched, `epoch=1`), `sp12-modules-dkms`,
-  `sp12-flex-tools`, `libcamera-sp12` (libcamera 0.7.2 + IMX681 support),
-  `sp12-ish-firmware` (private, see below).
+  `sp12-flex-tools`, `libcamera-sp12` (libcamera 0.8.0 + Surface Pro 12 camera
+  support), `pipewire-libcamera-sp12` (PipeWire's libcamera plugin rebuilt for
+  libcamera 0.8 until Arch ships it), `sp12-ish-firmware` (private, see below).
 - `iso/` — builds an Omarchy ISO with all of the above in its offline mirror
   (`build-sp12-iso.sh`, on top of the official omarchy-iso build).
 - `limine/` — the Limine/PicoEFI fixes, debugging patches, the Project Mu QEMU
@@ -93,8 +94,10 @@ Exceptions:
   (`dkms/patches*`, GPL-2.0-only), libcamera (`pkg/libcamera-sp12`,
   LGPL-2.1-or-later), BlueZ (`pkg/bluez-sp12`, GPL-2.0-or-later) and Limine
   (`limine/patches`, `pkg/limine`, BSD-2-Clause).
-- **Arch packaging:** `pkg/bluez-sp12` and `pkg/libcamera-sp12/PKGBUILD` derive
-  from Arch Linux's PKGBUILDs (0BSD, see `pkg/bluez-sp12/LICENSE`).
+- **Arch packaging:** `pkg/bluez-sp12`, `pkg/libcamera-sp12/PKGBUILD` and
+  `pkg/pipewire-libcamera-sp12/PKGBUILD` derive from Arch Linux's PKGBUILDs
+  (0BSD, see `pkg/bluez-sp12/LICENSE`). The PipeWire patch is a backport of an
+  upstream commit (MIT).
 - **`windows/BluetoothStack.wprp`** is Microsoft's, unmodified, from
   [microsoft/busiotools](https://github.com/microsoft/busiotools) (MIT).
 - **Camera tuning values** (colour matrices, lens shading tables) in the libcamera
