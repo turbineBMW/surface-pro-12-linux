@@ -12,21 +12,25 @@ Requires:
 Both ship in the sp12-modules DKMS package (dkms/ in this project).
 Ported from turbineBMW/surface-pro-11-linux (sp11-flex-pair).
 
-    sudo sp12-flex-pair            # pair (prompts to detach at the right moment)
-    sudo sp12-flex-pair --status   # read the channel, change nothing
-    sudo sp12-flex-pair --conn-params   # only store the fast link settings
+    sudo sp12-flex-pair              # pair, prompting to detach
+    sudo sp12-flex-pair --status     # read the channel, change nothing
+    sudo sp12-flex-pair --no-detach  # pair while attached (auto-pair)
+    sudo sp12-flex-pair --conn-params  # only store the fast link settings
 
-On success the keyboard's address is recorded in /etc/sp12/flex-keyboard-address
-so sp12-flex-bt-connect.service can reconnect it on every detach, and BlueZ
-stores a 7.5-11.25 ms connection interval for it: the keyboard never asks for
-one, and at Linux's default 30-50 ms its 125 Hz touchpad reports arrive in
-bursts, so libinput sees jagged motion and no acceleration.
+Attaching the keyboard runs this automatically when the keyboard is not paired
+or its bond no longer works (sp12-flex-autopair.service). On success
+the keyboard's address is recorded in /etc/sp12/flex-keyboard-address so
+sp12-flex-bt-connect.service can reconnect it on every detach,
+and BlueZ stores a 7.5-11.25 ms connection interval for it: the keyboard never
+asks for one, and at Linux's default 30-50 ms its 125 Hz touchpad reports
+arrive in bursts, so libinput sees jagged motion and no acceleration.
 """
-import argparse, atexit, fcntl, glob, os, re, select, socket, struct, subprocess, sys, time
+import argparse, fcntl, glob, os, re, select, socket, struct, subprocess, sys, time
 
 OOB_PID = "0C8F"
 RID_CAPABILITY, RID_HOST_BT, RID_DEVICE_BT, RID_PAIRING_KEY = 0x70, 0x56, 0x6E, 0x6F
-ADDRESS_FILE = "/etc/sp12/flex-keyboard-address"
+ADDRESS_FILE = os.environ.get(
+    "SP12_FLEX_ADDRESS_FILE", "/etc/sp12/flex-keyboard-address")
 # LE connection parameters (interval units 1.25 ms, timeout units 10 ms).
 # Latency 4 lets the keyboard skip idle events to save its battery.
 CONN_PARAMS = {"MinInterval": 6, "MaxInterval": 9, "Latency": 4, "Timeout": 200}
@@ -110,19 +114,6 @@ def read_device_report(fd, timeout):
     return None, None, None
 
 
-def wired_attached():
-    return any("045E:0C8B" in p for p in os.listdir("/sys/bus/hid/devices"))
-
-
-def adapter_pairable():
-    out = subprocess.run(["bluetoothctl", "show"], capture_output=True, text=True).stdout
-    return "Pairable: yes" in out
-
-
-def set_adapter_pairable(on):
-    subprocess.run(["bluetoothctl", "pairable", "on" if on else "off"], capture_output=True)
-
-
 def set_conn_params(host, kbd):
     """Store CONN_PARAMS in BlueZ's record for the keyboard and reconnect."""
     info = f"/var/lib/bluetooth/{host.upper()}/{kbd.upper()}/info"
@@ -143,6 +134,23 @@ def set_conn_params(host, kbd):
     subprocess.run(["bluetoothctl", "connect", kbd], capture_output=True)
     print("connection interval : 7.5-11.25 ms stored for the keyboard")
     return True
+
+
+def wired_attached():
+    return any("045E:0C8B" in p for p in os.listdir("/sys/bus/hid/devices"))
+
+
+def connected_le_devices():
+    """Other devices with a live connection, listed for context. (A 2026-09-06
+    hang was first blamed on an iPhone bridge holding the radio in peripheral
+    role; a capture later showed this host is the central on that link and
+    pairing works alongside it. The real cause of a pair that never connects
+    is a wedged in-flight LE connection attempt in the kernel, which answers
+    every new connect with a silent busy until the controller is reset.)"""
+    out = subprocess.run(["bluetoothctl", "devices", "Connected"],
+                         capture_output=True, text=True).stdout
+    return [line.split(" ", 2)[1] for line in out.splitlines()
+            if line.startswith("Device ") and len(line.split(" ", 2)) >= 2]
 
 
 def main():
@@ -192,14 +200,10 @@ def main():
         print("\n(status only -- nothing sent)")
         return
 
-    # A non-bondable adapter makes SMP request "No bonding" and no LTK, so the
-    # keys are discarded when the link drops. Be bondable for this pairing only.
-    if not adapter_pairable():
-        set_adapter_pairable(True)
-        atexit.register(set_adapter_pairable, False)
-        if not adapter_pairable():
-            sys.exit("could not make the adapter pairable (bluetoothctl pairable on)")
-        print("adapter             : pairable for this pairing")
+    others = [d for d in connected_le_devices() if d.upper() != kbd.upper()]
+    if others:
+        print("\nnote: other Bluetooth devices are connected: " + ", ".join(others)
+              + " (normally fine; listed for context)\n")
 
     tk = os.urandom(16)
     os.write(fd, bytes([RID_PAIRING_KEY]) + bytes.fromhex(kbd.replace(":", ""))[::-1]
@@ -221,18 +225,53 @@ def main():
             time.sleep(2)
         print("detached; pairing ...")
     time.sleep(2)
+    addr_type = "2" if kbd_random else "1"
+    # The kernel only stores the keys (bonds) while the adapter is bondable,
+    # which bluetoothd ties to Pairable, and Omarchy leaves that off. Pair with
+    # it on, then put it back.
+    pairable = "Pairable: yes" in subprocess.run(
+        ["bluetoothctl", "show"], capture_output=True, text=True).stdout
+    if not pairable:
+        subprocess.run(["bluetoothctl", "pairable", "on"], capture_output=True)
+    try:
+        paired = pair(kbd, addr_type)
+    finally:
+        if not pairable:
+            subprocess.run(["bluetoothctl", "pairable", "off"], capture_output=True)
+    finish(fd, kbd, paired)
+
+
+def pair(kbd, addr_type):
+    # Clear any bonding left pending by an earlier interrupted run (Busy 0x0a).
+    subprocess.run(["btmgmt", "cancelpair", "-t", addr_type, kbd],
+                   capture_output=True, text=True)
     paired = False
     for cap_io in ("3", "4"):
-        p = subprocess.run(["btmgmt", "pair", "-c", cap_io, "-t",
-                            "2" if kbd_random else "1", kbd],
+        try:
+            p = subprocess.run(["btmgmt", "pair", "-c", cap_io, "-t", addr_type, kbd],
+                               capture_output=True, text=True, timeout=45)
+            print("  " + (p.stdout.strip().splitlines() or ["(no output)"])[-1])
+        except subprocess.TimeoutExpired:
+            print("  pair timed out with no connection attempt.")
+            print("  The kernel never issued an LE connect: a wedged in-flight LE "
+                  "connection attempt makes every new connect a silent 'busy'.")
+            print("  Reset the controller and run this again:")
+            print("      sudo btmgmt power off; sleep 2; sudo btmgmt power on")
+            print("  (the auto-pair service does this by itself on attach)")
+            subprocess.run(["btmgmt", "cancelpair", "-t", addr_type, kbd],
                            capture_output=True, text=True)
-        print("  " + (p.stdout.strip().splitlines() or ["(no output)"])[-1])
+            break
         info = subprocess.run(["bluetoothctl", "info", kbd],
                               capture_output=True, text=True).stdout
         if "Paired: yes" in info:
             paired = True
             break
+        subprocess.run(["btmgmt", "cancelpair", "-t", addr_type, kbd],
+                       capture_output=True, text=True)
+    return paired
 
+
+def finish(fd, kbd, paired):
     subprocess.run(["bluetoothctl", "trust", kbd], capture_output=True)
     info = subprocess.run(["bluetoothctl", "info", kbd], capture_output=True, text=True).stdout
     print()
@@ -249,7 +288,7 @@ def main():
         f.write(kbd + "\n")
     os.chmod(ADDRESS_FILE, 0o644)
     print(f"address recorded in {ADDRESS_FILE} for reconnect-on-detach")
-    set_conn_params(host, kbd)
+    set_conn_params(local_addr(), kbd)
 
 
 main()

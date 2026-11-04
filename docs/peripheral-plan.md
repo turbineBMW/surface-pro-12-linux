@@ -853,6 +853,37 @@ so the first sightings were a fluke. The machine stays on PSR2 (tools 1.22's com
 `options` line). If it comes back: uncomment the line for PSR1, and compare Windows' PSR2
 parameters and the wake-line/SU tuning noted above.
 
+#### 8e: Flex Keyboard updates from the SP11 (tools 1.26, 2026-11-04)
+The SP11's `surface-pro-11-support` package (omarchy-pkgs, 1-3) moved on after the
+autopair port in tools 1.25. Carried over:
+- **`sp12-flex-pair`:** clears a bonding left pending by an interrupted run
+  (`btmgmt cancelpair`, else Busy 0x0a), gives up a pair after 45 s with the
+  wedged-LE-connect explanation and the controller reset to try, keeps Pairable on
+  only for the pairing (try/finally), lists other connected devices for context,
+  and reads the host address fresh before storing the connection interval.
+  `SP12_FLEX_ADDRESS_FILE` overrides the address file.
+- **`sp12-touchpad-mode` sleep hook:** after resume, a `systemd-run` job reads the
+  attached touchpad's (SAM `0019:045E:0C8D`) Input Mode (feature 0x84) and
+  surface/button switches (0x85), and restores mode 3 with both switches on, as
+  hid-multitouch does at attach. On the SP11 the touchpad came back in mouse mode
+  after about 1 in 60 resumes; not yet seen here, but the keyboard and endpoint are
+  the same. Only the SAM interface: BlueZ cuts the Bluetooth GET_FEATURE reply to
+  the report ID byte, so a mode read there is meaningless.
+- **Tests:** `pkg/sp12-flex-tools/test.sh` (stubbed bluetoothctl/btmgmt/hidraw, run
+  by the PKGBUILD's `check()`): autopair, reconnect-on-detach, the touchpad hook.
+
+Not carried:
+- **Privacy waits** in autopair/reconnect: they wait out `surface-pro-11-pen-pair`,
+  which turns LE privacy on while pairing (the pen click-reconnects only for a host
+  that sent it an identity key). `sp12-pen-pair` doesn't touch privacy. Port them
+  together with that pen pairing, which would also answer 8a's open "touch-to-pair
+  without Windows".
+- **Touchpad quirk:** the SP11 uses `AttrTPKComboLayout=below` for palm rejection over
+  Bluetooth; here the hwdb marks the touchpad internal (palm detection on) and the
+  quirk adds `ModelTabletModeNoSuspend`, which covers it.
+
+Hardware check pending: the Flex Keyboard was on the SP11 during the port.
+
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
   ~13% CPU from boot. Include the payload layout `{source, old, new}`, the
