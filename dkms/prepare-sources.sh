@@ -9,6 +9,11 @@
 # (e.g. linux-omarchy) uses the upstream stable tag of its version; its own
 # patches do not touch the files replaced here. A tarball in cache/ named after
 # the tag is used instead of the network, which offline installs rely on.
+#
+# From 7.4 the IPU7 ISYS is driven by ipu6 (staging ipu7 only probes with
+# intel_ipu7.force_probe=1), so 7.4+ builds intel-ipu6-isys from the
+# patches-7.4/ series and older kernels build intel-ipu7-isys from patches/.
+# dkms.conf makes the same choice.
 set -eu
 
 make_cache=
@@ -39,8 +44,17 @@ arch)
 	;;
 esac
 
+# 7.4 and later: ipu6 with IPU7 support, and the patches-7.4/ series
+if [ "$(printf '%s\n' 7.4 "${kver%%-*}" | sort -V | head -n1)" = 7.4 ]; then
+	isys=ipu6
+	patches=patches-7.4
+else
+	isys=ipu7
+	patches=patches
+fi
+
 here=$(pwd)
-rm -rf src surface bluetooth input nfc media bridge ipu7 power
+rm -rf src surface bluetooth input nfc media bridge isys power
 mkdir src
 if [ -f "$here/cache/$tag.tar.gz" ]; then
 	echo "prepare-sources: using cached $tag"
@@ -52,6 +66,7 @@ else
 		/drivers/media/i2c/ov13858.c /drivers/media/i2c/vd55g1.c \
 		/drivers/media/i2c/Kconfig /drivers/media/i2c/Makefile \
 		/drivers/media/pci/intel/ipu-bridge.c /drivers/staging/media/ipu7/ \
+		/drivers/media/pci/intel/ipu6/ \
 		/drivers/power/supply/surface_battery.c /drivers/power/supply/surface_charger.c
 	fetched=
 	for repo in $repos; do
@@ -76,7 +91,7 @@ if [ -n "$make_cache" ]; then
 	exit 0
 fi
 
-for p in "$here"/patches/*.patch; do
+for p in "$here/$patches"/*.patch; do
 	echo "prepare-sources: applying $(basename "$p")"
 	patch -d src -p1 --forward --batch -s < "$p"
 done
@@ -110,14 +125,23 @@ echo 'obj-m += ov13858.o imx681.o vd55g1.o' > media/Kbuild
 cp src/drivers/media/pci/intel/ipu-bridge.c bridge/
 echo 'obj-m += ipu-bridge.o' > bridge/Kbuild
 
-# IPU7 ISYS (snooped frame writes); intel-ipu7 itself stays stock.
-cp -r src/drivers/staging/media/ipu7 ipu7
-rm -f ipu7/Makefile ipu7/Kconfig
-cat > ipu7/Kbuild <<'KB'
+# IPU7 ISYS (snooped frame writes); intel-ipu6 or intel-ipu7 itself stays
+# stock.
+if [ "$isys" = ipu6 ]; then
+	cp -r src/drivers/media/pci/intel/ipu6 isys
+	# Only the ISYS module, with the object list from the upstream Makefile
+	sed -n '/^intel-ipu6-isys-y/,/^$/p' isys/Makefile > isys/Kbuild
+	echo 'obj-m += intel-ipu6-isys.o' >> isys/Kbuild
+	rm -f isys/Makefile isys/Kconfig
+else
+	cp -r src/drivers/staging/media/ipu7 isys
+	rm -f isys/Makefile isys/Kconfig
+	cat > isys/Kbuild <<'KB'
 intel-ipu7-isys-objs += ipu7-isys.o ipu7-isys-csi2.o ipu7-isys-csi-phy.o \
 	ipu7-fw-isys.o ipu7-isys-video.o ipu7-isys-queue.o ipu7-isys-subdev.o
 obj-m += intel-ipu7-isys.o
 KB
+fi
 
 # Battery charge limit; battery events off over suspend (keyboard wake).
 mkdir power

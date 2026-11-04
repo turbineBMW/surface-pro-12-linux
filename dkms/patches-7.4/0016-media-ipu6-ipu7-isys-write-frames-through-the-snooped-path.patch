@@ -1,0 +1,33 @@
+Subject: media: ipu6: ipu7: write ISYS frames through the snooped path
+
+The IPU7 ISYS output pin is cleared and never sets link.is_snoop, so the
+IPU writes captured frames without snooping the CPU caches. Userspace
+reads capture buffers through cached mappings (libcamera's software ISP,
+CPU and GPU upload paths alike), and on x86 dma_sync_*_for_cpu() does
+not invalidate, so cache lines still holding a buffer's previous frame
+are read back as stale data: 32-pixel, one-row runs of old pixels that
+show up as orange and blue dashes along moving edges (Surface Pro 12
+Intel, IPU 7.5, OV13858 and IMX681, 1920x1080 through libcamera).
+
+Set is_snoop for the output pin. The IPU7 MMU configurations already
+include an IS_DATA_WR_SNOOP stream. With it the dashes are gone on both
+cameras at unchanged frame rate (tested on the staging ipu7 driver, which
+had the same is_snoop = 0).
+---
+diff --git a/drivers/media/pci/intel/ipu6/ipu7-fw-isys.c b/drivers/media/pci/intel/ipu6/ipu7-fw-isys.c
+index b1211e24562d..b0d00907d7c6 100644
+--- a/drivers/media/pci/intel/ipu6/ipu7-fw-isys.c
++++ b/drivers/media/pci/intel/ipu6/ipu7-fw-isys.c
+@@ -214,6 +214,12 @@ static int ipu7_isys_fw_pin_cfg(struct ipu6_isys_video *av,
+ 	output_pin->link.pbk_slot_id = IPU7_MSG_LINK_PBK_SLOT_ID_DONT_CARE;
+ 	output_pin->link.dest = 0; /* IPU_INSYS_OUTPUT_LINK_DEST_MEM */
+ 	output_pin->link.use_sw_managed = 1;
++	/*
++	 * Write frames through the snooped path: the CPU reads capture
++	 * buffers through cached mappings, and non-snooped writes leave
++	 * stale lines of the buffer's previous frame in the CPU cache.
++	 */
++	output_pin->link.is_snoop = 1;
+ 	output_pin->crop.line_top = 0;
+ 	output_pin->crop.line_bottom = 0;
+ 	output_pin->dpcm.enable = 0;

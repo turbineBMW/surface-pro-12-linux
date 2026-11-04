@@ -897,7 +897,7 @@ Hardware check (2026-11-04, tools 1.26, keyboard brought back from the SP11):
   with the bond in place, as its message allows. It re-sends the host address to
   prompt the report, so the help no longer says "change nothing".
 
-### Phase 9: kernel 7.4 and the camera stack (next session starts here)
+### Phase 9: kernel 7.4 and the camera stack (in progress)
 Survey on 2026-11-04 (running 7.2.8-9-omarchy). The 7.4-rc1 commits below were checked in
 `~/Projects/linux` (`git describe --contains`). The rest is from a web survey, with links.
 
@@ -933,6 +933,36 @@ IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
 3. Test on hardware: both RGB cameras through libcamera, the IR camera (`/dev/sp12-ir`,
    Y8 644x604, emitter strobe), face unlock, and the snoop dashes gone under motion.
 4. Upstream `0016` against ipu6 (linux-media), not staging (see Post-work).
+
+**Progress (2026-11-04): steps 1 and 2 done, step 3 waits on a 7.4 kernel.**
+- Worktree `~/Projects/linux-7.4`, branch `sp12/7.4` on v7.4-rc1: the series
+  rebased, one commit per patch. Exported as `dkms/patches-7.4/` (same numbers;
+  applying it to v7.4-rc1 reproduces the branch exactly).
+- Rebase changes: `0006` uses the new `.id =` ACPI table style. `0010` takes the
+  `client_info` pad-op argument (the only sensor that needed it; ov13858 and
+  vd55g1 were converted upstream). `0011` drops OVTID858 (upstream since
+  2ee01a094aba, same frequencies). `0017` adds the VD55G0 as a fourth entry in
+  vd55g1's new version table (vd55g4 support, 7a1e5239ae63) and skips the
+  colour-version read for it (0x0670, never read on our hardware). `0018` joins
+  SMO55F0 to the new upstream ACPI table (TBE20A1).
+- `0016` is now `media: ipu6: ipu7: ...`, setting `is_snoop` in
+  `ipu7-fw-isys.c`. `0020`/`0021` are dropped: ipu6's table already has
+  GREY/Y10/Y10P, the CSI-2 receiver accepts Y8/Y10, and ipu6 passes its IPU6
+  frame-format codes to IPU7 firmware, which are equal to IPU7's
+  (RAW8 = 20, RAW10 = 21, RAW16 = 24).
+- DKMS 1.15: `prepare-sources.sh` and `dkms.conf` pick `patches-7.4/` and build
+  `intel-ipu6-isys` for 7.4+, or `patches/` and `intel-ipu7-isys` before 7.4.
+  Arch already builds `VIDEO_INTEL_IPU6=m`, and `VIDEO_INTEL_IPU6_IPU7`
+  defaults to y, so ipu6 claims the IPU on 7.4. Both paths build all 13
+  modules (7.2.8 headers; the 7.4 tree with modpost warnings only).
+- Our IPU is 8086:b05d, **IPU 7.5** (Panther Lake). Under ipu6 the entities
+  are named `Intel IPU7.5 CSI2 1` / `Intel IPU7.5 ISYS Capture 8` and the media
+  driver is `intel-ipu6` (libcamera's simple pipeline already lists it).
+  `sp12-ir-graph` reads the prefix from the graph; the udev rule matches
+  `Intel IPU7* ISYS Capture 8`.
+- Left for step 3: boot 7.4 and test the RGB cameras, the IR camera (does
+  ipu6's default CSI-2 route carry Y8 to Capture 8?), face unlock, and the
+  dashes under motion.
 
 **Related, after the port:**
 - **libcamera v0.8.0** (2026-11-01): GPU soft-ISP lens shading, the simple IPA on libipa's

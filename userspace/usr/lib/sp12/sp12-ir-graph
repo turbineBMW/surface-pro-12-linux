@@ -7,8 +7,6 @@
 set -eu
 
 SENSOR='"vd55g1 2-0060"'
-CSI='"Intel IPU7 CSI2 1"'
-CAP_NAME='Intel IPU7 ISYS Capture 8'
 FMT='Y8_1X8/644x604'
 
 media=
@@ -23,6 +21,13 @@ for i in $(seq 1 60); do
 	sleep 0.5
 done
 [ -n "$media" ] || { echo "sp12-ir-graph: IR sensor not bound" >&2; exit 1; }
+
+# Entity names carry the IPU version: "Intel IPU7" on the staging ipu7 driver,
+# "Intel IPU7.5" on ipu6 (7.4 and later).
+ipu=$(media-ctl -d "$media" -p | sed -n 's/^- entity [0-9]*: \(Intel IPU[0-9.]*\) CSI2 1 .*/\1/p')
+[ -n "$ipu" ] || { echo "sp12-ir-graph: no IPU CSI2 1 entity" >&2; exit 1; }
+CSI="\"$ipu CSI2 1\""
+CAP_NAME="$ipu ISYS Capture 8"
 
 media-ctl -d "$media" -l "$CSI:1 -> \"$CAP_NAME\":0 [1]"
 media-ctl -d "$media" -V "$SENSOR:0 [fmt:$FMT]"
