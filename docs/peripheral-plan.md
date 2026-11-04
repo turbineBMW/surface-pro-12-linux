@@ -1046,8 +1046,11 @@ cameras, IR, face unlock and the snoop fix all work.**
     (privacy on): no stale-bond verdict, no repair marker, no controller reset
     while it runs, and repeated pairings don't keep the reconnect job alive.
     Ported with the SP11's tests (`pkg/sp12-flex-tools/test.sh`).
-  - Still open from 8a: touch-to-pair, where Windows derives the pen's bond
-    from the digitizer's pen ID with no pairing step.
+  - **Touch-to-pair: won't do** (decided 2026-11-04). Windows derives the pen's
+    bond from the digitizer's pen ID with no pairing step. On the SP11 that
+    needed BlueZ/kernel Bluetooth changes the Linux Bluetooth maintainers
+    weren't keen on, and the SP11 and SP12 should behave the same. Pairing
+    stays manual (`sp12-pen-pair`), as on the SP11.
 - The upstream submissions under Post-work. `0008` is committed in `~/Projects/linux-tabletsw`
   and waits for the user's sign-off.
 
