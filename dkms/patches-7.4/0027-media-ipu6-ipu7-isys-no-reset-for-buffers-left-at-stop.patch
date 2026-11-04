@@ -1,0 +1,38 @@
+Subject: media: ipu6: ipu7: do not flag an ISYS reset for buffers left at stop
+
+IPU7 firmware acks STREAM_FLUSH and STREAM_CLOSE without returning the
+capture buffers it still holds: the last two or three queued buffers get
+a FRAME_SOF but never a PIN_DATA_READY. return_buffers() then finds them
+on the active list and sets need_reset, and video_open() fails with
+-EIO ("isys power cycle required") until runtime suspend clears it.
+
+The flag is also set after the stream has dropped its runtime PM
+reference, so the suspend that should clear it can come first. On a
+Surface Pro 12 (IPU 7.5) every stream stop left the flag set, and the
+next open of any capture node failed until something else cycled the
+ISYS runtime PM.
+
+The staging ipu7 driver returned these buffers without a reset. Do the
+same on IPU7: with the ISYS kept active by a running stream on another
+port, five IR captures started and stopped back to back each delivered
+every frame, and the other stream lost none.
+---
+diff --git a/drivers/media/pci/intel/ipu6/ipu6-isys-queue.c b/drivers/media/pci/intel/ipu6/ipu6-isys-queue.c
+index 23d00e1f89e8..eebb0bc30e52 100644
+--- a/drivers/media/pci/intel/ipu6/ipu6-isys-queue.c
++++ b/drivers/media/pci/intel/ipu6/ipu6-isys-queue.c
+@@ -463,6 +463,14 @@ static void return_buffers(struct ipu6_isys_queue *aq,
+ 
+ 	spin_unlock_irqrestore(&aq->lock, flags);
+ 
++	/*
++	 * IPU7 firmware acks the flush and the close without returning
++	 * the buffers it still holds, so a non-empty active list is
++	 * expected there and the stream is already closed.
++	 */
++	if (IS_IPU7(av->isys->adev->isp))
++		need_reset = false;
++
+ 	if (need_reset) {
+ 		mutex_lock(&av->isys->mutex);
+ 		av->isys->need_reset = true;

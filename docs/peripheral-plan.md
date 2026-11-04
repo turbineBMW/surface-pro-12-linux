@@ -934,7 +934,7 @@ IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
    Y8 644x604, emitter strobe), face unlock, and the snoop dashes gone under motion.
 4. Upstream `0016` against ipu6 (linux-media), not staging (see Post-work).
 
-**Progress (2026-11-04): steps 1 and 2 done, step 3 waits on a 7.4 kernel.**
+**Progress (2026-11-04): steps 1 and 2 done, step 3 mostly done (below).**
 - Worktree `~/Projects/linux-7.4`, branch `sp12/7.4` on v7.4-rc1: the series
   rebased, one commit per patch. Exported as `dkms/patches-7.4/` (same numbers;
   applying it to v7.4-rc1 reproduces the branch exactly).
@@ -960,9 +960,41 @@ IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
   driver is `intel-ipu6` (libcamera's simple pipeline already lists it).
   `sp12-ir-graph` reads the prefix from the graph; the udev rule matches
   `Intel IPU7* ISYS Capture 8`.
-- Left for step 3: boot 7.4 and test the RGB cameras, the IR camera (does
-  ipu6's default CSI-2 route carry Y8 to Capture 8?), face unlock, and the
-  dashes under motion.
+
+**Step 3 (2026-11-04, test kernel `7.4.0-rc1-sp12` built from `sp12/7.4`):
+cameras work; face unlock and the dashes under motion still to check.**
+- ipu6 claims the IPU (`intel-ipu6`, model `ipu7.5`) and all three sensors
+  bind: OV13858 on CSI2 0 (4 lanes), VD55G0 on CSI2 1 (1 lane), IMX681 on
+  CSI2 2. libcamera lists the rear (camera 1, OV13858) and front (camera 2,
+  IMX681). Both stream and converge to normal images.
+- IR: tools 1.27 (the IPU7.5-aware rule and `sp12-ir-graph`) brings up
+  `/dev/sp12-ir`. ipu6's default route carries Y8 to Capture 8: GREY 644x604,
+  every frame complete, emitter on alternate frames (mean ~101 lit, ~15 dark).
+- **`0027` (ISYS):** IPU7 firmware acks FLUSH and CLOSE without returning the
+  2–3 buffers it still holds (SOF, never PIN_DATA_READY). ipu6's
+  `return_buffers()` then sets `need_reset`, and every `open()` fails with
+  EIO ("isys power cycle required"). The flag is set after the stream drops
+  its runtime-PM reference, so the suspend that should clear it can come
+  first: on stock 7.4-rc1 the camera opened after an IR stream failed until
+  something else cycled the ISYS. Staging ipu7 returned these buffers without
+  a reset (and closed the firmware per stream). `0027` skips the flag on
+  IPU7. Kept awake by a 450-frame front stream, five IR start/stops on the
+  firmware without a reset each got every frame, and the front stream lost
+  none. **Upstream candidate** (linux-media, with `0016`): the ordering bug
+  hits IPU6 too.
+- **`0028` (VD55G0 power):** the rear's 4-lane port 0 aggregates PHY 0 and
+  PHY 1, and the IR lane is on PHY 1. While the VD55G0 is powered (even in
+  standby), the rear camera gets PHY ready but no SOF, and stop/close time
+  out. vd55g1's 4 s autosuspend kept it powered after every IR stream: rear
+  0 s and 3 s after IR failed, 8 s and 15 s worked. `0028` suspends at
+  stream stop. The two cameras can never stream at the same time (Windows
+  can't either, presumably).
+- With both, 24 streams in every order (IR→rear, IR→front→rear, rear→IR)
+  all complete, no kernel errors. The DKMS path builds the same
+  `srcversion`s as the tested modules. `prepare-sources.sh` now maps RC
+  kernels to their tag (`7.4.0-rc1-sp12` → `v7.4-rc1`).
+- Left: face unlock (Facelock on `/dev/sp12-ir`), and the snoop dashes under
+  motion on both RGB cameras (`0016`).
 
 **Related, after the port:**
 - **libcamera v0.8.0** (2026-11-01): GPU soft-ISP lens shading, the simple IPA on libipa's

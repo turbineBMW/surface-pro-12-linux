@@ -35,11 +35,13 @@ arch)
 	repos="https://github.com/archlinux/linux.git"
 	;;
 *)
-	# 7.2.5-6-omarchy -> v7.2.5; 7.3.0-1-foo -> v7.3
+	# 7.2.5-6-omarchy -> v7.2.5; 7.3.0-1-foo -> v7.3; 7.4.0-rc1-sp12 -> v7.4-rc1
 	ver=$(printf '%s\n' "$kver" | sed -n 's/^\([0-9]*\.[0-9]*\)\(\.[0-9]*\)\{0,1\}.*/\1\2/p')
 	[ -n "$ver" ] || { echo "prepare-sources: cannot parse '$kver'" >&2; exit 1; }
 	ver=${ver%.0}
 	tag="v$ver"
+	rc=$(printf '%s\n' "$kver" | sed -n 's/^[0-9.]*-\(rc[0-9]*\).*/\1/p')
+	[ -z "$rc" ] || tag="$tag-$rc"
 	repos="https://github.com/gregkh/linux.git https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
 	;;
 esac
