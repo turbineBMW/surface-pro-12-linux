@@ -1043,9 +1043,15 @@ cameras, IR, face unlock and the snoop fix all work.**
   - Still open: the IR sensor makes libcamera log "Unable to set controls:
     Permission denied" before it's skipped (also on 0.7.2 with 7.4); the IR
     camera is used through `/dev/sp12-ir`, not libcamera.
-- **GPU ISP:** "debayer_egl: Fix texture sampling steps" (patchwork 28702, 2026-10-29,
-  unreviewed) fixes Bayer row offsets when scaling. Try it against the IMX681 downscale
-  aliasing. Multi-pass GPU ISP is still only the 2026-06 RFC.
+- **GPU ISP: tried 2026-11-04, CPU ISP stays.** "debayer_egl: Fix texture sampling
+  steps" (patchwork 28702, 2026-10-29, unreviewed: step 1/stride and 1/height instead
+  of 1/(stride-1), 1/(height-1)) on libcamera-sp12 0.8.0, front camera 1920x1080:
+  the frame breaks into rectangular tiles of different colour casts with magenta and
+  cyan vertical stripes (Bayer phase flipping by region once the step is exactly one
+  texel), `gridscore` 1.00. Without it, 0.8.0's GPU ISP shows no obvious 1-px grid at
+  4x (score 0.94 vs 0.72 on the CPU; the GPU path has no TNR/CNR, so pixel noise
+  raises the score). The CPU ISP stays the default anyway: our binning, TNR, CNR and
+  LSC are CPU-only. Multi-pass GPU ISP is still only the 2026-06 RFC.
 - **Watch:** soft-ISP temporal denoise (Božik, unmerged) and the AIQB-to-simple-IPA parser
   (Tia, v3) overlap our TNR/`.aiqb` work. intel/ipu7-drivers #102: OV08F4 stalls on 7.2.x.
 - **PSYS stays blocked:** ipu7-camera-hal's 2026-09-26 release still has no graph
