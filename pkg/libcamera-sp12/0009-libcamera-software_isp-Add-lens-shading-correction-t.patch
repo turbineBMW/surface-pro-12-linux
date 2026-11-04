@@ -1,15 +1,15 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From d6b794e34821cac59d81d9330125cc4e4e558ccf Mon Sep 17 00:00:00 2001
 From: turbinebmw <turbine.bmw@gmail.com>
 Date: Thu, 24 Sep 2026 12:30:00 -0400
-Subject: [PATCH] libcamera: software_isp: Add lens-shading correction to 2x2
- binning
+Subject: [PATCH 09/11] libcamera: software_isp: Add lens-shading correction to
+ 2x2 binning
 
 The Surface Pro 12 cameras lose most of their light towards the edges of
 the frame: on a flat field the front camera's green channel falls to 0.4
 of the centre at the side edges and 0.17 in the corners. With binning
 showing the full field of view, the dark corners are plainly visible.
 
-Read an optional `lensShading` section from the simple IPA tuning file: a
+Read an optional `lensShading` section from the soft ISP tuning file: a
 grid of gains per Bayer channel (R, Gr, Gb, B; 2048 = 1.0) spanning the
 full pixel array, one table per illuminant with its white point as R/G,
 B/G, and a strength that is applied as an exponent on the gains. Each
@@ -29,597 +29,22 @@ LIBCAMERA_SOFTISP_LSC overrides the strength, with 0 turning it off.
 
 Unbinned shading needs unpacked raw with a 2-line Bayer pattern.
 ---
---- a/src/libcamera/software_isp/debayer.h
-+++ b/src/libcamera/software_isp/debayer.h
-@@ -11,7 +11,9 @@
- 
- #pragma once
- 
-+#include <array>
- #include <stdint.h>
-+#include <vector>
- 
- #include <libcamera/base/log.h>
- #include <libcamera/base/object.h>
-@@ -32,6 +34,23 @@
- 
- LOG_DECLARE_CATEGORY(Debayer)
- 
-+/*
-+ * Lens-shading correction from a sensor's tuning file: per illuminant, its
-+ * white point (R/G, B/G) and one grid of gains per Bayer channel (R, Gr, Gb,
-+ * B), 2048 = 1.0, spanning the full pixel array.
-+ */
-+struct LensShading {
-+	struct Table {
-+		std::array<float, 2> whitePoint;
-+		std::array<std::vector<uint16_t>, 4> planes;
-+	};
-+	Size grid;
-+	/* Pixel array the grid spans; empty when it is the input size */
-+	Size arraySize;
-+	float strength = 1.0f;
-+	std::vector<Table> tables;
-+};
-+
- class Debayer : public Object
- {
- public:
-@@ -56,6 +75,8 @@
- 
- 	virtual const SharedFD &getStatsFD() = 0;
- 
-+	virtual void setLensShading([[maybe_unused]] LensShading lensShading) {}
-+
- 	unsigned int frameSize() { return outputConfig_.frameSize; }
- 
- 	Signal<FrameBuffer *> inputBufferReady;
---- a/src/libcamera/software_isp/debayer_cpu.cpp
-+++ b/src/libcamera/software_isp/debayer_cpu.cpp
-@@ -13,6 +13,7 @@
- 
- #include <algorithm>
- #include <cmath>
-+#include <limits>
- #include <stdio.h>
- #include <stdlib.h>
- #include <string.h>
-@@ -52,6 +53,7 @@
- 	void setupInputMemcpy(const uint8_t *linePointers[]);
- 	void shiftLinePointers(const uint8_t *linePointers[], const uint8_t *src);
- 	void memcpyNextLine(const uint8_t *linePointers[]);
-+	void shadeLine(uint8_t *line, const uint8_t *src);
- 	void process2(uint32_t frame, const uint8_t *src, uint8_t *dst);
- 	void process4(uint32_t frame, const uint8_t *src, uint8_t *dst);
- 	void processBinned(uint32_t frame, const uint8_t *src, uint8_t *dst);
-@@ -68,6 +70,9 @@
- 	unsigned int lineBufferIndex_;
- 	std::vector<uint8_t> lineBuffers_[kMaxLineBuffers];
- 	bool enableInputMemcpy_;
-+	/* Lines are copied: for speed, or to shade them */
-+	bool copyLines_;
-+	const uint8_t *windowBase_;
- };
- 
- /**
-@@ -457,7 +462,8 @@
- }
- 
- template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
--void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist)
-+void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist,
-+				  const uint16_t *lsc)
- {
- 	const pixel_t *l0 = reinterpret_cast<const pixel_t *>(src[0]);
- 	const pixel_t *l1 = reinterpret_cast<const pixel_t *>(src[1]);
-@@ -485,6 +491,13 @@
- 			r = l1[i];
- 		}
- 
-+		if (lsc) {
-+			r = shade(r, lsc[0]);
-+			g = shade(g, lsc[1]);
-+			b = shade(b, lsc[2]);
-+			lsc += 3;
-+		}
-+
- 		if (hist) {
- 			r = temporalFilter(hist[0], r);
- 			g = temporalFilter(hist[1], g);
-@@ -496,6 +509,149 @@
- 	}
- }
- 
-+/* Apply a lens-shading gain (2048 = 1.0) to the signal above black level. */
-+inline int DebayerCpu::shade(int value, unsigned int gain) const
-+{
-+	if (value <= lscBlack_)
-+		return value;
-+
-+	const int shaded = lscBlack_ + (((value - lscBlack_) * static_cast<int>(gain) + 1024) >> 11);
-+	return std::min(shaded, rawMax_);
-+}
-+
-+void DebayerCpu::setLensShading(LensShading lensShading)
-+{
-+	lensShading_ = std::move(lensShading);
-+}
-+
-+/*
-+ * Pick the lens-shading table whose white point is nearest the current white
-+ * balance, rebuilding the gain map when that changes. Runs before the worker
-+ * threads start on a frame.
-+ */
-+void DebayerCpu::updateLensShading(const DebayerParams &params)
-+{
-+	const float r = params.gains.r() > 0 ? params.gains.g() / params.gains.r() : 1.0f;
-+	const float b = params.gains.b() > 0 ? params.gains.g() / params.gains.b() : 1.0f;
-+
-+	unsigned int best = 0;
-+	float bestDist = std::numeric_limits<float>::max();
-+	for (unsigned int i = 0; i < lensShading_.tables.size(); i++) {
-+		const auto &wp = lensShading_.tables[i].whitePoint;
-+		const float dist = (wp[0] - r) * (wp[0] - r) + (wp[1] - b) * (wp[1] - b);
-+		if (dist < bestDist) {
-+			bestDist = dist;
-+			best = i;
-+		}
-+	}
-+
-+	lscBlack_ = std::lround(params.blackLevel.g() * (rawMax_ + 1));
-+
-+	if (static_cast<int>(best) != lscTable_)
-+		buildLensShadingMap(best);
-+}
-+
-+/*
-+ * Gains (R, Gr, Gb, B) of a lens-shading table at input pixel (x, y). The grid
-+ * spans the sensor pixel array; the input is taken to be that array scaled
-+ * uniformly and centred, as sensor binned modes crop it.
-+ */
-+std::array<float, 4> DebayerCpu::lensShadingGains(const LensShading::Table &table,
-+						  float x, float y) const
-+{
-+	const unsigned int gw = lensShading_.grid.width;
-+	const unsigned int gh = lensShading_.grid.height;
-+	const Size &array = lensShading_.arraySize.isNull() ? inputSize_
-+							    : lensShading_.arraySize;
-+	const float scale = static_cast<float>(array.width) / inputSize_.width;
-+	const float xa = x * scale + (array.width - inputSize_.width * scale) / 2;
-+	const float ya = y * scale + (array.height - inputSize_.height * scale) / 2;
-+
-+	const float gx = std::clamp(xa / array.width * (gw - 1), 0.0f, gw - 1.0f);
-+	const float gy = std::clamp(ya / array.height * (gh - 1), 0.0f, gh - 1.0f);
-+	const unsigned int x0 = std::min(static_cast<unsigned int>(gx), gw - 2);
-+	const unsigned int y0 = std::min(static_cast<unsigned int>(gy), gh - 2);
-+	const float fx = gx - x0;
-+	const float fy = gy - y0;
-+
-+	std::array<float, 4> gains;
-+	for (unsigned int c = 0; c < 4; c++) {
-+		const std::vector<uint16_t> &plane = table.planes[c];
-+		const float a = plane[y0 * gw + x0] * (1 - fx) + plane[y0 * gw + x0 + 1] * fx;
-+		const float b = plane[(y0 + 1) * gw + x0] * (1 - fx) +
-+				plane[(y0 + 1) * gw + x0 + 1] * fx;
-+		gains[c] = std::pow((a * (1 - fy) + b * fy) / 2048.0f, lscStrength_);
-+	}
-+
-+	return gains;
-+}
-+
-+/*
-+ * Resample one lens-shading table to the gains the debayer applies: one per
-+ * binned output pixel and colour on the binned path, else one per raw pixel
-+ * of the window plus the line-buffer padding either side.
-+ */
-+void DebayerCpu::buildLensShadingMap(unsigned int table)
-+{
-+	const LensShading::Table &t = lensShading_.tables[table];
-+	auto q11 = [](float gain) {
-+		return static_cast<uint16_t>(std::lround(std::min(gain, 31.0f) * 2048.0f));
-+	};
-+
-+	if (binning_) {
-+		const unsigned int width = window_.width / 2;
-+		const unsigned int height = window_.height / 2;
-+		/* Slots follow the binned function's r and b, swapped for BGR output */
-+		const unsigned int redSlot = swapRedBlueGains_ ? 2 : 0;
-+		const unsigned int blueSlot = 2 - redSlot;
-+
-+		lscMap_.resize(static_cast<size_t>(width) * height * 3);
-+
-+		for (unsigned int oy = 0; oy < height; oy++) {
-+			uint16_t *row = lscMap_.data() + static_cast<size_t>(oy) * width * 3;
-+
-+			for (unsigned int ox = 0; ox < width; ox++) {
-+				/* Centre of the 2x2 block */
-+				const std::array<float, 4> g =
-+					lensShadingGains(t, window_.x + 2 * ox + 1.0f,
-+							 window_.y + 2 * oy + 1.0f);
-+				row[ox * 3 + redSlot] = q11(g[0]);
-+				row[ox * 3 + 1] = q11((g[1] + g[2]) / 2);
-+				row[ox * 3 + blueSlot] = q11(g[3]);
-+			}
-+		}
-+	} else {
-+		/* Plane of each 2x2 position, [y & 1][x & 1] */
-+		static constexpr std::array<std::array<unsigned int, 4>, 4> kPlanes = { {
-+			{ 3, 2, 1, 0 }, /* BGGR */
-+			{ 2, 3, 0, 1 }, /* GBRG */
-+			{ 1, 0, 3, 2 }, /* GRBG */
-+			{ 0, 1, 2, 3 }, /* RGGB */
-+		} };
-+		const std::array<unsigned int, 4> &planes = kPlanes[lscRawOrder_];
-+		const int pad = inputConfig_.patternSize.width;
-+
-+		lscMapStride_ = window_.width + 2 * pad;
-+		lscMap_.resize(static_cast<size_t>(lscMapStride_) * window_.height);
-+
-+		for (unsigned int y = 0; y < window_.height; y++) {
-+			uint16_t *row = lscMap_.data() + static_cast<size_t>(y) * lscMapStride_;
-+			const int ay = window_.y + y;
-+
-+			for (int x = -pad; x < static_cast<int>(window_.width) + pad; x++) {
-+				const int ax = window_.x + x;
-+				const std::array<float, 4> g = lensShadingGains(t, ax + 0.5f, ay + 0.5f);
-+				row[x + pad] = q11(g[planes[(ay & 1) * 2 + (ax & 1)]]);
-+			}
-+		}
-+	}
-+
-+	lscTable_ = table;
-+	LOG(Debayer, Info)
-+		<< "Lens shading table " << table << " (white point "
-+		<< t.whitePoint[0] << ", " << t.whitePoint[1] << ")";
-+}
-+
- /*
-  * LIBCAMERA_SOFTISP_TNR: "0" turns temporal noise reduction off; otherwise
-  * "alpha,base,slope" (defaults 64,24,3): alpha is the weight of a new frame
-@@ -568,6 +724,7 @@
- 	debayerBinned_ = nullptr;
- 	/* TNR thresholds are given in 10-bit units */
- 	tnrRawScale_ = std::ldexp(1.0, static_cast<int>(bayerFormat.bitDepth) - 10);
-+	rawMax_ = (1 << bayerFormat.bitDepth) - 1;
- 
- 	if (bayerFormat.packing != BayerFormat::Packing::None ||
- 	    !isStandardBayerOrder(bayerFormat.order))
-@@ -700,6 +857,13 @@
- 	swapRedBlueGains_ = false;
- 	debayerBinned_ = nullptr;
- 
-+	/* Unbinned lens shading works on unpacked 16-bit raw lines */
-+	rawMax_ = (1 << bayerFormat.bitDepth) - 1;
-+	lscRawOrder_ = bayerFormat.order;
-+	lscRawShadable_ = bayerFormat.packing == BayerFormat::Packing::None &&
-+			  bayerFormat.bitDepth > 8 && bayerFormat.bitDepth <= 16 &&
-+			  isStandardBayerOrder(bayerFormat.order);
-+
- 	auto invalidFmt = []() -> int {
- 		LOG(Debayer, Error) << "Unsupported input output format combination";
- 		return -EINVAL;
-@@ -886,6 +1050,23 @@
- 	configureTnr();
- 
- 	/*
-+	 * LIBCAMERA_SOFTISP_LSC sets the lens-shading strength, as an exponent
-+	 * on the table gains; 0 turns lens shading off.
-+	 */
-+	const char *lscEnv = utils::secure_getenv("LIBCAMERA_SOFTISP_LSC");
-+	lscStrength_ = lscEnv ? std::clamp(std::strtof(lscEnv, nullptr), 0.0f, 1.0f)
-+			      : lensShading_.strength;
-+	inputSize_ = inputCfg.size;
-+	lscTable_ = -1;
-+	lscMap_.clear();
-+	lscEnabled_ = !lensShading_.tables.empty() && lscStrength_ > 0 &&
-+		      (binning_ || (lscRawShadable_ && inputConfig_.patternSize.height == 2));
-+	lscRaw_ = lscEnabled_ && !binning_;
-+	LOG(Debayer, Info)
-+		<< "Lens shading "
-+		<< (lscEnabled_ ? "on (strength " + std::to_string(lscStrength_) + ")" : "off");
-+
-+	/*
- 	 * Set the stats window to the whole processed window. Its coordinates are
- 	 * relative to the debayered area since debayering passes only the part of
- 	 * data to be processed to the stats; see SwStatsCpu::setWindow.
-@@ -925,7 +1106,8 @@
- 	lineBufferLength_ = debayer_->window_.width * inputConfig.bpp / 8 +
- 			    2 * lineBufferPadding_;
- 
--	if (enableInputMemcpy_) {
-+	copyLines_ = enableInputMemcpy_ || debayer_->lscRaw_;
-+	if (copyLines_) {
- 		for (unsigned int i = 0; i <= inputConfig.patternSize.height; i++)
- 			lineBuffers_[i].resize(lineBufferLength_);
- 	}
-@@ -973,13 +1155,14 @@
- {
- 	const unsigned int patternHeight = debayer_->inputConfig_.patternSize.height;
- 
--	if (!enableInputMemcpy_)
-+	if (!copyLines_)
- 		return;
- 
- 	for (unsigned int i = 0; i < patternHeight; i++) {
- 		memcpy(lineBuffers_[i].data(),
- 		       linePointers[i + 1] - lineBufferPadding_,
- 		       lineBufferLength_);
-+		shadeLine(lineBuffers_[i].data(), linePointers[i + 1]);
- 		linePointers[i + 1] = lineBuffers_[i].data() + lineBufferPadding_;
- 	}
- 
-@@ -1002,17 +1185,37 @@
- {
- 	const unsigned int patternHeight = debayer_->inputConfig_.patternSize.height;
- 
--	if (!enableInputMemcpy_)
-+	if (!copyLines_)
- 		return;
- 
- 	memcpy(lineBuffers_[lineBufferIndex_].data(),
- 	       linePointers[patternHeight] - lineBufferPadding_,
- 	       lineBufferLength_);
-+	shadeLine(lineBuffers_[lineBufferIndex_].data(), linePointers[patternHeight]);
- 	linePointers[patternHeight] = lineBuffers_[lineBufferIndex_].data() + lineBufferPadding_;
- 
- 	lineBufferIndex_ = (lineBufferIndex_ + 1) % (patternHeight + 1);
- }
- 
-+/*
-+ * Apply lens shading to a copied raw line, padding included. The source line
-+ * pointer gives its row; rows just outside the window use the nearest one.
-+ */
-+void DebayerCpuThread::shadeLine(uint8_t *line, const uint8_t *src)
-+{
-+	if (!debayer_->lscRaw_ || debayer_->lscMap_.empty())
-+		return;
-+
-+	const int height = debayer_->window_.height;
-+	const long row = std::clamp<long>((src - windowBase_) / static_cast<long>(debayer_->inputConfig_.stride),
-+					  0, height - 1);
-+	const uint16_t *gains = debayer_->lscMap_.data() + row * debayer_->lscMapStride_;
-+	uint16_t *pixels = reinterpret_cast<uint16_t *>(line);
-+
-+	for (unsigned int x = 0; x < debayer_->lscMapStride_; x++)
-+		pixels[x] = debayer_->shade(pixels[x], gains[x]);
-+}
-+
- /**
-  * \brief Process part of the image assigned to this debayer thread
-  * \param[in] frame The frame number
-@@ -1026,6 +1229,7 @@
- 	/* Adjust src to top left corner of the window */
- 	src += (window.y + yStart_) * debayer_->inputConfig_.stride +
- 	       window.x * debayer_->inputConfig_.bpp / 8;
-+	windowBase_ = src - yStart_ * debayer_->inputConfig_.stride;
- 	/* Adjust dst for yStart_ (window lines; binning halves them) */
- 	dst += (debayer_->binning_ ? yStart_ / 2 : yStart_) *
- 	       debayer_->outputConfig_.stride;
-@@ -1055,6 +1259,9 @@
- 	uint16_t *hist = debayer_->tnrEnabled_
- 				 ? debayer_->tnrHistory_.data() + yStart_ / 2 * histStride
- 				 : nullptr;
-+	const uint16_t *lsc = debayer_->lscEnabled_ && !debayer_->lscMap_.empty()
-+				      ? debayer_->lscMap_.data() + yStart_ / 2 * histStride
-+				      : nullptr;
- 
- 	for (unsigned int y = yStart_; y < yEnd_; y += 2) {
- 		linePointers[1] = src;
-@@ -1074,12 +1281,14 @@
- 		linePointers[0] = linePointers[1];
- 
- 		debayer_->stats_->processLine0(frame, y, linePointers, threadIndex_);
--		debayer_->debayerBinned(dst, linePointers + 1, hist);
-+		debayer_->debayerBinned(dst, linePointers + 1, hist, lsc);
- 
- 		src += 2 * inputStride;
- 		dst += outputStride;
- 		if (hist)
- 			hist += histStride;
-+		if (lsc)
-+			lsc += histStride;
- 	}
- }
- 
-@@ -1299,6 +1508,8 @@
- 	dmaSyncBegin(dmaSyncers, input, output);
- 
- 	updateLookupTables(params);
-+	if (lscEnabled_)
-+		updateLensShading(params);
- 
- 	/* Copy metadata from the input buffer */
- 	FrameMetadata &metadata = output->_d()->metadata();
---- a/src/libcamera/software_isp/debayer_cpu.h
-+++ b/src/libcamera/software_isp/debayer_cpu.h
-@@ -47,6 +47,7 @@
- 	void stop() override;
- 	SizeRange sizes(PixelFormat inputFormat, const Size &inputSize) override;
- 	const SharedFD &getStatsFD() override { return stats_->getStatsFD(); }
-+	void setLensShading(LensShading lensShading) override;
- 
- private:
- 	friend class DebayerCpuThread;
-@@ -89,10 +90,11 @@
- 	 * hist points to the output line's temporal-noise-reduction history, 3
- 	 * values per pixel, or is null when temporal noise reduction is off.
- 	 */
--	using binnedFn = void (DebayerCpu::*)(uint8_t *dst, const uint8_t *src[], uint16_t *hist);
--	void debayerBinned(uint8_t *dst, const uint8_t *src[], uint16_t *hist)
-+	using binnedFn = void (DebayerCpu::*)(uint8_t *dst, const uint8_t *src[], uint16_t *hist,
-+					     const uint16_t *lsc);
-+	void debayerBinned(uint8_t *dst, const uint8_t *src[], uint16_t *hist, const uint16_t *lsc)
- 	{
--		(this->*debayerBinned_)(dst, src, hist);
-+		(this->*debayerBinned_)(dst, src, hist, lsc);
- 	}
- 
- 	/*
-@@ -101,7 +103,13 @@
- 	 * lines, at the left edge of the window.
- 	 */
- 	template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
--	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist);
-+	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist,
-+			      const uint16_t *lsc);
-+	int shade(int value, unsigned int gain) const;
-+	void updateLensShading(const DebayerParams &params);
-+	void buildLensShadingMap(unsigned int table);
-+	std::array<float, 4> lensShadingGains(const LensShading::Table &table,
-+					      float x, float y) const;
- 	int temporalFilter(uint16_t &hist, int value);
- 	void configureTnr();
- 
-@@ -188,6 +196,25 @@
- 	double tnrRawScale_;                       /* raw units per 10-bit unit */
- 	bool tnrEnabled_;
- 	bool tnrPrimed_;
-+
-+	/*
-+	 * Lens shading on the binned path: the tuning file's tables, and for
-+	 * the table nearest the current white balance a per-output-pixel gain
-+	 * map (3 per pixel in the binned function's r, g, b order, 2048 = 1.0).
-+	 */
-+	LensShading lensShading_;
-+	std::vector<uint16_t> lscMap_;
-+	int lscTable_;
-+	bool lscEnabled_;
-+	/* Shade raw lines as they are copied (unbinned path) */
-+	bool lscRaw_;
-+	bool lscRawShadable_;
-+	BayerFormat::Order lscRawOrder_;
-+	unsigned int lscMapStride_;
-+	float lscStrength_;
-+	int lscBlack_;
-+	int rawMax_;
-+	Size inputSize_;
- 	Rectangle window_;
- 	std::unique_ptr<SwStatsCpu> stats_;
- 	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */
---- a/src/libcamera/software_isp/software_isp.cpp
-+++ b/src/libcamera/software_isp/software_isp.cpp
-@@ -7,6 +7,7 @@
- 
- #include "libcamera/internal/software_isp/software_isp.h"
- 
-+#include <algorithm>
- #include <memory>
- #include <optional>
- #include <stdint.h>
-@@ -15,6 +16,7 @@
- #include <sys/types.h>
- #include <unistd.h>
- 
-+#include <libcamera/base/file.h>
- #include <libcamera/base/log.h>
- #include <libcamera/base/thread.h>
- #include <libcamera/base/utils.h>
-@@ -26,6 +28,7 @@
- #include "libcamera/internal/bayer_format.h"
- #include "libcamera/internal/framebuffer.h"
- #include "libcamera/internal/software_isp/debayer_params.h"
-+#include "libcamera/internal/yaml_parser.h"
- 
- #include "debayer_cpu.h"
- #if HAVE_DEBAYER_EGL
-@@ -79,6 +82,80 @@
-  * \param[out] ipaControls The IPA controls to update
-  * handler
-  */
-+namespace {
-+
-+/*
-+ * Read the optional top-level lensShading section of a tuning file. The IPA
-+ * ignores top-level keys it doesn't know; the debayer applies the tables.
-+ */
-+std::optional<LensShading> readLensShading(const std::string &path)
-+{
-+	static constexpr std::array<const char *, 4> kPlanes = { "r", "gr", "gb", "b" };
-+
-+	File file(path);
-+	if (!file.open(File::OpenModeFlag::ReadOnly))
-+		return std::nullopt;
-+
-+	std::unique_ptr<ValueNode> root = YamlParser::parse(file);
-+	if (!root || !root->contains("lensShading"))
-+		return std::nullopt;
-+
-+	const ValueNode &node = (*root)["lensShading"];
-+	std::optional<unsigned int> width = node["grid"][0].get<unsigned int>();
-+	std::optional<unsigned int> height = node["grid"][1].get<unsigned int>();
-+	if (!width || !height || *width < 2 || *height < 2) {
-+		LOG(SoftwareIsp, Warning) << "Invalid lensShading grid in " << path;
-+		return std::nullopt;
-+	}
-+
-+	LensShading lensShading;
-+	lensShading.grid = Size(*width, *height);
-+	const std::size_t points = static_cast<std::size_t>(*width) * *height;
-+
-+	if (node.contains("arraySize")) {
-+		std::optional<unsigned int> arrayWidth = node["arraySize"][0].get<unsigned int>();
-+		std::optional<unsigned int> arrayHeight = node["arraySize"][1].get<unsigned int>();
-+		if (arrayWidth && arrayHeight)
-+			lensShading.arraySize = Size(*arrayWidth, *arrayHeight);
-+	}
-+	lensShading.strength = std::clamp(node["strength"].get<float>().value_or(1.0f), 0.0f, 1.0f);
-+
-+	for (const ValueNode &entry : node["tables"].asList()) {
-+		LensShading::Table table;
-+		table.whitePoint = { entry["whitePoint"][0].get<float>().value_or(0.0f),
-+				     entry["whitePoint"][1].get<float>().value_or(0.0f) };
-+
-+		for (unsigned int i = 0; i < kPlanes.size(); i++) {
-+			/* One list per grid row, as YAML lists are capped at 1000 entries */
-+			const ValueNode &plane = entry[kPlanes[i]];
-+			std::vector<uint16_t> &gains = table.planes[i];
-+			gains.reserve(points);
-+			for (const ValueNode &row : plane.asList())
-+				for (const ValueNode &value : row.asList())
-+					gains.push_back(value.get<uint16_t>().value_or(2048));
-+
-+			if (plane.size() != *height || gains.size() != points) {
-+				LOG(SoftwareIsp, Warning)
-+					<< "Invalid lensShading table in " << path;
-+				return std::nullopt;
-+			}
-+		}
-+
-+		lensShading.tables.push_back(std::move(table));
-+	}
-+
-+	if (lensShading.tables.empty())
-+		return std::nullopt;
-+
-+	LOG(SoftwareIsp, Info)
-+		<< "Lens shading: " << lensShading.tables.size() << " tables, "
-+		<< lensShading.grid << " grid, from " << path;
-+
-+	return lensShading;
-+}
-+
-+} /* namespace */
-+
- SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
- 			 ControlInfoMap *ipaControls)
- 	: ispWorkerThread_("SWIspWorker"),
-@@ -150,6 +227,10 @@
- 	std::string ipaTuningFile =
- 		ipa_->configurationFile(sensor->model() + ".yaml", "uncalibrated.yaml");
- 
-+	std::optional<LensShading> lensShading = readLensShading(ipaTuningFile);
-+	if (lensShading)
-+		debayer_->setLensShading(std::move(*lensShading));
-+
- 	IPACameraSensorInfo sensorInfo{};
- 	int ret = sensor->sensorInfo(&sensorInfo);
- 	if (ret) {
---- a/src/ipa/simple/data/imx681.yaml
-+++ b/src/ipa/simple/data/imx681.yaml
-@@ -46,4 +46,2094 @@
-   - Agc:
-       # Raise gain beyond 1/60 s of exposure to limit motion blur.
-       exposureGainThreshold: 16667
+ src/ipa/softisp/data/imx681.yaml            | 2090 +++++++++++++++++
+ src/ipa/softisp/data/ov13858.yaml           | 2281 +++++++++++++++++++
+ src/libcamera/software_isp/debayer.h        |   21 +
+ src/libcamera/software_isp/debayer_cpu.cpp  |  221 +-
+ src/libcamera/software_isp/debayer_cpu.h    |   35 +-
+ src/libcamera/software_isp/software_isp.cpp |   81 +
+ 6 files changed, 4720 insertions(+), 9 deletions(-)
+
+diff --git a/src/ipa/softisp/data/imx681.yaml b/src/ipa/softisp/data/imx681.yaml
+index 90dd476..67b2680 100644
+--- a/src/ipa/softisp/data/imx681.yaml
++++ b/src/ipa/softisp/data/imx681.yaml
+@@ -51,4 +51,2094 @@ algorithms:
+         Normal:
+           exposureTime: [ 16667, 1000000 ]
+           gain: [ 16.0, 16.0 ]
 +
 +
 +
@@ -2711,12 +2136,14 @@ Unbinned shading needs unpacked raw with a 2-line Bayer pattern.
 +             [ 13915, 12578, 11557, 10861, 10375, 10027, 9750, 9653, 9523, 9307, 9172, 8902, 8628, 8359, 8035, 7712, 7379, 7079, 6785, 6529, 6291, 6078, 5861, 5674, 5531, 5392, 5283, 5199, 5125, 5063, 5028, 5011, 5024, 5049, 5095, 5160, 5259, 5374, 5495, 5655, 5817, 6007, 6223, 6472, 6706, 6974, 7282, 7617, 7897, 8238, 8532, 8858, 9100, 9307, 9520, 9523, 9750, 9988, 10225, 10636, 11276, 12255, 13458 ],
 +             [ 15315, 13391, 12208, 11244, 10720, 10336, 9988, 9750, 9716, 9523, 9307, 9129, 8919, 8671, 8367, 8084, 7803, 7463, 7206, 6948, 6679, 6466, 6272, 6076, 5905, 5788, 5678, 5571, 5517, 5442, 5429, 5399, 5405, 5418, 5465, 5536, 5622, 5758, 5900, 6041, 6210, 6401, 6637, 6854, 7086, 7377, 7656, 8003, 8248, 8541, 8797, 9100, 9307, 9523, 9523, 9750, 9824, 10117, 10493, 11061, 11850, 13001, 14598 ] ]
  ...
---- a/src/ipa/simple/data/ov13858.yaml
-+++ b/src/ipa/simple/data/ov13858.yaml
-@@ -39,4 +39,2285 @@
-   - Agc:
-       # Raise gain beyond 1/60 s of exposure to limit motion blur.
-       exposureGainThreshold: 16667
+diff --git a/src/ipa/softisp/data/ov13858.yaml b/src/ipa/softisp/data/ov13858.yaml
+index f129b92..6ec7333 100644
+--- a/src/ipa/softisp/data/ov13858.yaml
++++ b/src/ipa/softisp/data/ov13858.yaml
+@@ -45,4 +45,2285 @@ algorithms:
+         Normal:
+           exposureTime: [ 16667, 1000000 ]
+           gain: [ 63.99, 63.99 ]
 +
 +
 +
@@ -4999,5 +4426,599 @@ Unbinned shading needs unpacked raw with a 2-line Bayer pattern.
 +             [ 8946, 8434, 8332, 8013, 7686, 7340, 6997, 6646, 6346, 6064, 5795, 5568, 5381, 5191, 5019, 4857, 4711, 4595, 4468, 4365, 4248, 4158, 4070, 3993, 3930, 3877, 3820, 3789, 3765, 3735, 3722, 3716, 3718, 3734, 3763, 3785, 3826, 3873, 3933, 4004, 4080, 4161, 4260, 4368, 4475, 4598, 4725, 4864, 5018, 5191, 5380, 5577, 5790, 6064, 6325, 6653, 6989, 7341, 7719, 8100, 8397, 8508, 9002 ],
 +             [ 10086, 8640, 8388, 8244, 7900, 7561, 7244, 6906, 6600, 6287, 6013, 5779, 5564, 5368, 5198, 5039, 4892, 4768, 4630, 4525, 4429, 4320, 4241, 4162, 4098, 4036, 3989, 3948, 3919, 3896, 3888, 3889, 3886, 3895, 3927, 3956, 3995, 4049, 4101, 4168, 4234, 4313, 4424, 4539, 4638, 4772, 4896, 5052, 5223, 5392, 5584, 5776, 6047, 6319, 6589, 6916, 7244, 7591, 7990, 8287, 8505, 8702, 10041 ] ]
  ...
+diff --git a/src/libcamera/software_isp/debayer.h b/src/libcamera/software_isp/debayer.h
+index e30a052..a0a2064 100644
+--- a/src/libcamera/software_isp/debayer.h
++++ b/src/libcamera/software_isp/debayer.h
+@@ -11,7 +11,9 @@
+ 
+ #pragma once
+ 
++#include <array>
+ #include <stdint.h>
++#include <vector>
+ 
+ #include <libcamera/base/log.h>
+ #include <libcamera/base/object.h>
+@@ -32,6 +34,23 @@ class FrameBuffer;
+ 
+ LOG_DECLARE_CATEGORY(Debayer)
+ 
++/*
++ * Lens-shading correction from a sensor's tuning file: per illuminant, its
++ * white point (R/G, B/G) and one grid of gains per Bayer channel (R, Gr, Gb,
++ * B), 2048 = 1.0, spanning the full pixel array.
++ */
++struct LensShading {
++	struct Table {
++		std::array<float, 2> whitePoint;
++		std::array<std::vector<uint16_t>, 4> planes;
++	};
++	Size grid;
++	/* Pixel array the grid spans; empty when it is the input size */
++	Size arraySize;
++	float strength = 1.0f;
++	std::vector<Table> tables;
++};
++
+ class Debayer : public Object
+ {
+ public:
+@@ -57,6 +76,8 @@ public:
+ 
+ 	virtual const SharedFD &getStatsFD() = 0;
+ 
++	virtual void setLensShading([[maybe_unused]] LensShading lensShading) {}
++
+ 	unsigned int frameSize() { return outputConfig_.frameSize; }
+ 
+ 	Signal<FrameBuffer *> inputBufferReady;
+diff --git a/src/libcamera/software_isp/debayer_cpu.cpp b/src/libcamera/software_isp/debayer_cpu.cpp
+index d328eac..b5bfdcb 100644
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <limits>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -53,6 +54,7 @@ private:
+ 	void setupInputMemcpy(const uint8_t *linePointers[]);
+ 	void shiftLinePointers(const uint8_t *linePointers[], const uint8_t *src);
+ 	void memcpyNextLine(const uint8_t *linePointers[]);
++	void shadeLine(uint8_t *line, const uint8_t *src);
+ 	void process2(uint32_t frame, const uint8_t *src, uint8_t *dst);
+ 	void process4(uint32_t frame, const uint8_t *src, uint8_t *dst);
+ 	void processBinned(uint32_t frame, const uint8_t *src, uint8_t *dst);
+@@ -69,6 +71,9 @@ private:
+ 	unsigned int lineBufferIndex_;
+ 	std::vector<uint8_t> lineBuffers_[kMaxLineBuffers];
+ 	bool enableInputMemcpy_;
++	/* Lines are copied: for speed, or to shade them */
++	bool copyLines_;
++	const uint8_t *windowBase_;
+ };
+ 
+ /**
+@@ -458,7 +463,8 @@ inline int DebayerCpu::temporalFilter(uint16_t &hist, int value)
+ }
+ 
+ template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
+-void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist)
++void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist,
++				  const uint16_t *lsc)
+ {
+ 	const pixel_t *l0 = reinterpret_cast<const pixel_t *>(src[0]);
+ 	const pixel_t *l1 = reinterpret_cast<const pixel_t *>(src[1]);
+@@ -486,6 +492,13 @@ void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *
+ 			r = l1[i];
+ 		}
+ 
++		if (lsc) {
++			r = shade(r, lsc[0]);
++			g = shade(g, lsc[1]);
++			b = shade(b, lsc[2]);
++			lsc += 3;
++		}
++
+ 		if (hist) {
+ 			r = temporalFilter(hist[0], r);
+ 			g = temporalFilter(hist[1], g);
+@@ -497,6 +510,149 @@ void DebayerCpu::debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *
+ 	}
+ }
+ 
++/* Apply a lens-shading gain (2048 = 1.0) to the signal above black level. */
++inline int DebayerCpu::shade(int value, unsigned int gain) const
++{
++	if (value <= lscBlack_)
++		return value;
++
++	const int shaded = lscBlack_ + (((value - lscBlack_) * static_cast<int>(gain) + 1024) >> 11);
++	return std::min(shaded, rawMax_);
++}
++
++void DebayerCpu::setLensShading(LensShading lensShading)
++{
++	lensShading_ = std::move(lensShading);
++}
++
++/*
++ * Pick the lens-shading table whose white point is nearest the current white
++ * balance, rebuilding the gain map when that changes. Runs before the worker
++ * threads start on a frame.
++ */
++void DebayerCpu::updateLensShading(const DebayerParams &params)
++{
++	const float r = params.gains.r() > 0 ? params.gains.g() / params.gains.r() : 1.0f;
++	const float b = params.gains.b() > 0 ? params.gains.g() / params.gains.b() : 1.0f;
++
++	unsigned int best = 0;
++	float bestDist = std::numeric_limits<float>::max();
++	for (unsigned int i = 0; i < lensShading_.tables.size(); i++) {
++		const auto &wp = lensShading_.tables[i].whitePoint;
++		const float dist = (wp[0] - r) * (wp[0] - r) + (wp[1] - b) * (wp[1] - b);
++		if (dist < bestDist) {
++			bestDist = dist;
++			best = i;
++		}
++	}
++
++	lscBlack_ = std::lround(params.blackLevel.g() * (rawMax_ + 1));
++
++	if (static_cast<int>(best) != lscTable_)
++		buildLensShadingMap(best);
++}
++
++/*
++ * Gains (R, Gr, Gb, B) of a lens-shading table at input pixel (x, y). The grid
++ * spans the sensor pixel array; the input is taken to be that array scaled
++ * uniformly and centred, as sensor binned modes crop it.
++ */
++std::array<float, 4> DebayerCpu::lensShadingGains(const LensShading::Table &table,
++						  float x, float y) const
++{
++	const unsigned int gw = lensShading_.grid.width;
++	const unsigned int gh = lensShading_.grid.height;
++	const Size &array = lensShading_.arraySize.isNull() ? inputSize_
++							    : lensShading_.arraySize;
++	const float scale = static_cast<float>(array.width) / inputSize_.width;
++	const float xa = x * scale + (array.width - inputSize_.width * scale) / 2;
++	const float ya = y * scale + (array.height - inputSize_.height * scale) / 2;
++
++	const float gx = std::clamp(xa / array.width * (gw - 1), 0.0f, gw - 1.0f);
++	const float gy = std::clamp(ya / array.height * (gh - 1), 0.0f, gh - 1.0f);
++	const unsigned int x0 = std::min(static_cast<unsigned int>(gx), gw - 2);
++	const unsigned int y0 = std::min(static_cast<unsigned int>(gy), gh - 2);
++	const float fx = gx - x0;
++	const float fy = gy - y0;
++
++	std::array<float, 4> gains;
++	for (unsigned int c = 0; c < 4; c++) {
++		const std::vector<uint16_t> &plane = table.planes[c];
++		const float a = plane[y0 * gw + x0] * (1 - fx) + plane[y0 * gw + x0 + 1] * fx;
++		const float b = plane[(y0 + 1) * gw + x0] * (1 - fx) +
++				plane[(y0 + 1) * gw + x0 + 1] * fx;
++		gains[c] = std::pow((a * (1 - fy) + b * fy) / 2048.0f, lscStrength_);
++	}
++
++	return gains;
++}
++
++/*
++ * Resample one lens-shading table to the gains the debayer applies: one per
++ * binned output pixel and colour on the binned path, else one per raw pixel
++ * of the window plus the line-buffer padding either side.
++ */
++void DebayerCpu::buildLensShadingMap(unsigned int table)
++{
++	const LensShading::Table &t = lensShading_.tables[table];
++	auto q11 = [](float gain) {
++		return static_cast<uint16_t>(std::lround(std::min(gain, 31.0f) * 2048.0f));
++	};
++
++	if (binning_) {
++		const unsigned int width = window_.width / 2;
++		const unsigned int height = window_.height / 2;
++		/* Slots follow the binned function's r and b, swapped for BGR output */
++		const unsigned int redSlot = swapRedBlueGains_ ? 2 : 0;
++		const unsigned int blueSlot = 2 - redSlot;
++
++		lscMap_.resize(static_cast<size_t>(width) * height * 3);
++
++		for (unsigned int oy = 0; oy < height; oy++) {
++			uint16_t *row = lscMap_.data() + static_cast<size_t>(oy) * width * 3;
++
++			for (unsigned int ox = 0; ox < width; ox++) {
++				/* Centre of the 2x2 block */
++				const std::array<float, 4> g =
++					lensShadingGains(t, window_.x + 2 * ox + 1.0f,
++							 window_.y + 2 * oy + 1.0f);
++				row[ox * 3 + redSlot] = q11(g[0]);
++				row[ox * 3 + 1] = q11((g[1] + g[2]) / 2);
++				row[ox * 3 + blueSlot] = q11(g[3]);
++			}
++		}
++	} else {
++		/* Plane of each 2x2 position, [y & 1][x & 1] */
++		static constexpr std::array<std::array<unsigned int, 4>, 4> kPlanes = { {
++			{ 3, 2, 1, 0 }, /* BGGR */
++			{ 2, 3, 0, 1 }, /* GBRG */
++			{ 1, 0, 3, 2 }, /* GRBG */
++			{ 0, 1, 2, 3 }, /* RGGB */
++		} };
++		const std::array<unsigned int, 4> &planes = kPlanes[lscRawOrder_];
++		const int pad = inputConfig_.patternSize.width;
++
++		lscMapStride_ = window_.width + 2 * pad;
++		lscMap_.resize(static_cast<size_t>(lscMapStride_) * window_.height);
++
++		for (unsigned int y = 0; y < window_.height; y++) {
++			uint16_t *row = lscMap_.data() + static_cast<size_t>(y) * lscMapStride_;
++			const int ay = window_.y + y;
++
++			for (int x = -pad; x < static_cast<int>(window_.width) + pad; x++) {
++				const int ax = window_.x + x;
++				const std::array<float, 4> g = lensShadingGains(t, ax + 0.5f, ay + 0.5f);
++				row[x + pad] = q11(g[planes[(ay & 1) * 2 + (ax & 1)]]);
++			}
++		}
++	}
++
++	lscTable_ = table;
++	LOG(Debayer, Info)
++		<< "Lens shading table " << table << " (white point "
++		<< t.whitePoint[0] << ", " << t.whitePoint[1] << ")";
++}
++
+ /*
+  * LIBCAMERA_SOFTISP_TNR: "0" turns temporal noise reduction off; otherwise
+  * "alpha,base,slope" (defaults 64,24,3): alpha is the weight of a new frame
+@@ -569,6 +725,7 @@ void DebayerCpu::setBinnedFunction(const BayerFormat &bayerFormat, bool addAlpha
+ 	debayerBinned_ = nullptr;
+ 	/* TNR thresholds are given in 10-bit units */
+ 	tnrRawScale_ = std::ldexp(1.0, static_cast<int>(bayerFormat.bitDepth) - 10);
++	rawMax_ = (1 << bayerFormat.bitDepth) - 1;
+ 
+ 	if (bayerFormat.packing != BayerFormat::Packing::None ||
+ 	    !isStandardBayerOrder(bayerFormat.order))
+@@ -683,6 +840,13 @@ int DebayerCpu::setDebayerFunctions(PixelFormat inputFormat,
+ 	swapRedBlueGains_ = false;
+ 	debayerBinned_ = nullptr;
+ 
++	/* Unbinned lens shading works on unpacked 16-bit raw lines */
++	rawMax_ = (1 << bayerFormat.bitDepth) - 1;
++	lscRawOrder_ = bayerFormat.order;
++	lscRawShadable_ = bayerFormat.packing == BayerFormat::Packing::None &&
++			  bayerFormat.bitDepth > 8 && bayerFormat.bitDepth <= 16 &&
++			  isStandardBayerOrder(bayerFormat.order);
++
+ 	auto invalidFmt = []() -> int {
+ 		LOG(Debayer, Error) << "Unsupported input output format combination";
+ 		return -EINVAL;
+@@ -872,6 +1036,23 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
+ 
+ 	configureTnr();
+ 
++	/*
++	 * LIBCAMERA_SOFTISP_LSC sets the lens-shading strength, as an exponent
++	 * on the table gains; 0 turns lens shading off.
++	 */
++	const char *lscEnv = utils::secure_getenv("LIBCAMERA_SOFTISP_LSC");
++	lscStrength_ = lscEnv ? std::clamp(std::strtof(lscEnv, nullptr), 0.0f, 1.0f)
++			      : lensShading_.strength;
++	inputSize_ = inputCfg.size;
++	lscTable_ = -1;
++	lscMap_.clear();
++	lscEnabled_ = !lensShading_.tables.empty() && lscStrength_ > 0 &&
++		      (binning_ || (lscRawShadable_ && inputConfig_.patternSize.height == 2));
++	lscRaw_ = lscEnabled_ && !binning_;
++	LOG(Debayer, Info)
++		<< "Lens shading "
++		<< (lscEnabled_ ? "on (strength " + std::to_string(lscStrength_) + ")" : "off");
++
+ 	/*
+ 	 * Set the stats window to the whole processed window. Its coordinates are
+ 	 * relative to the debayered area since debayering passes only the part of
+@@ -912,7 +1093,8 @@ void DebayerCpuThread::configure(unsigned int yStart, unsigned int yEnd)
+ 	lineBufferLength_ = debayer_->window_.width * inputConfig.bpp / 8 +
+ 			    2 * lineBufferPadding_;
+ 
+-	if (enableInputMemcpy_) {
++	copyLines_ = enableInputMemcpy_ || debayer_->lscRaw_;
++	if (copyLines_) {
+ 		for (unsigned int i = 0; i <= inputConfig.patternSize.height; i++)
+ 			lineBuffers_[i].resize(lineBufferLength_);
+ 	}
+@@ -954,13 +1136,14 @@ void DebayerCpuThread::setupInputMemcpy(const uint8_t *linePointers[])
+ {
+ 	const unsigned int patternHeight = debayer_->inputConfig_.patternSize.height;
+ 
+-	if (!enableInputMemcpy_)
++	if (!copyLines_)
+ 		return;
+ 
+ 	for (unsigned int i = 0; i < patternHeight; i++) {
+ 		memcpy(lineBuffers_[i].data(),
+ 		       linePointers[i + 1] - lineBufferPadding_,
+ 		       lineBufferLength_);
++		shadeLine(lineBuffers_[i].data(), linePointers[i + 1]);
+ 		linePointers[i + 1] = lineBuffers_[i].data() + lineBufferPadding_;
+ 	}
+ 
+@@ -983,17 +1166,37 @@ void DebayerCpuThread::memcpyNextLine(const uint8_t *linePointers[])
+ {
+ 	const unsigned int patternHeight = debayer_->inputConfig_.patternSize.height;
+ 
+-	if (!enableInputMemcpy_)
++	if (!copyLines_)
+ 		return;
+ 
+ 	memcpy(lineBuffers_[lineBufferIndex_].data(),
+ 	       linePointers[patternHeight] - lineBufferPadding_,
+ 	       lineBufferLength_);
++	shadeLine(lineBuffers_[lineBufferIndex_].data(), linePointers[patternHeight]);
+ 	linePointers[patternHeight] = lineBuffers_[lineBufferIndex_].data() + lineBufferPadding_;
+ 
+ 	lineBufferIndex_ = (lineBufferIndex_ + 1) % (patternHeight + 1);
+ }
+ 
++/*
++ * Apply lens shading to a copied raw line, padding included. The source line
++ * pointer gives its row; rows just outside the window use the nearest one.
++ */
++void DebayerCpuThread::shadeLine(uint8_t *line, const uint8_t *src)
++{
++	if (!debayer_->lscRaw_ || debayer_->lscMap_.empty())
++		return;
++
++	const int height = debayer_->window_.height;
++	const long row = std::clamp<long>((src - windowBase_) / static_cast<long>(debayer_->inputConfig_.stride),
++					  0, height - 1);
++	const uint16_t *gains = debayer_->lscMap_.data() + row * debayer_->lscMapStride_;
++	uint16_t *pixels = reinterpret_cast<uint16_t *>(line);
++
++	for (unsigned int x = 0; x < debayer_->lscMapStride_; x++)
++		pixels[x] = debayer_->shade(pixels[x], gains[x]);
++}
++
+ /**
+  * \brief Process part of the image assigned to this debayer thread
+  * \param[in] frame The frame number
+@@ -1007,6 +1210,7 @@ void DebayerCpuThread::process(uint32_t frame, const uint8_t *src, uint8_t *dst)
+ 	/* Adjust src to top left corner of the window */
+ 	src += (window.y + yStart_) * debayer_->inputConfig_.stride +
+ 	       window.x * debayer_->inputConfig_.bpp / 8;
++	windowBase_ = src - yStart_ * debayer_->inputConfig_.stride;
+ 	/* Adjust dst for yStart_ (window lines; binning halves them) */
+ 	dst += (debayer_->binning_ ? yStart_ / 2 : yStart_) *
+ 	       debayer_->outputConfig_.stride;
+@@ -1036,6 +1240,9 @@ void DebayerCpuThread::processBinned(uint32_t frame, const uint8_t *src, uint8_t
+ 	uint16_t *hist = debayer_->tnrEnabled_
+ 				 ? debayer_->tnrHistory_.data() + yStart_ / 2 * histStride
+ 				 : nullptr;
++	const uint16_t *lsc = debayer_->lscEnabled_ && !debayer_->lscMap_.empty()
++				      ? debayer_->lscMap_.data() + yStart_ / 2 * histStride
++				      : nullptr;
+ 
+ 	for (unsigned int y = yStart_; y < yEnd_; y += 2) {
+ 		linePointers[1] = src;
+@@ -1055,12 +1262,14 @@ void DebayerCpuThread::processBinned(uint32_t frame, const uint8_t *src, uint8_t
+ 		linePointers[0] = linePointers[1];
+ 
+ 		debayer_->stats_->processLine0(frame, y, linePointers, threadIndex_);
+-		debayer_->debayerBinned(dst, linePointers + 1, hist);
++		debayer_->debayerBinned(dst, linePointers + 1, hist, lsc);
+ 
+ 		src += 2 * inputStride;
+ 		dst += outputStride;
+ 		if (hist)
+ 			hist += histStride;
++		if (lsc)
++			lsc += histStride;
+ 	}
+ }
+ 
+@@ -1280,6 +1489,8 @@ void DebayerCpu::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 	dmaSyncBegin(dmaSyncers, input, output);
+ 
+ 	updateLookupTables(params);
++	if (lscEnabled_)
++		updateLensShading(params);
+ 
+ 	/* Copy metadata from the input buffer */
+ 	FrameMetadata &metadata = output->_d()->metadata();
+diff --git a/src/libcamera/software_isp/debayer_cpu.h b/src/libcamera/software_isp/debayer_cpu.h
+index 7ab6b4f..4899cd3 100644
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -48,6 +48,7 @@ public:
+ 	void stop() override;
+ 	SizeRange sizes(PixelFormat inputFormat, const Size &inputSize) override;
+ 	const SharedFD &getStatsFD() override { return stats_->getStatsFD(); }
++	void setLensShading(LensShading lensShading) override;
+ 
+ private:
+ 	friend class DebayerCpuThread;
+@@ -90,10 +91,11 @@ private:
+ 	 * hist points to the output line's temporal-noise-reduction history, 3
+ 	 * values per pixel, or is null when temporal noise reduction is off.
+ 	 */
+-	using binnedFn = void (DebayerCpu::*)(uint8_t *dst, const uint8_t *src[], uint16_t *hist);
+-	void debayerBinned(uint8_t *dst, const uint8_t *src[], uint16_t *hist)
++	using binnedFn = void (DebayerCpu::*)(uint8_t *dst, const uint8_t *src[], uint16_t *hist,
++					     const uint16_t *lsc);
++	void debayerBinned(uint8_t *dst, const uint8_t *src[], uint16_t *hist, const uint16_t *lsc)
+ 	{
+-		(this->*debayerBinned_)(dst, src, hist);
++		(this->*debayerBinned_)(dst, src, hist, lsc);
+ 	}
+ 
+ 	/*
+@@ -102,7 +104,13 @@ private:
+ 	 * lines, at the left edge of the window.
+ 	 */
+ 	template<bool addAlphaByte, bool ccmEnabled, BayerFormat::Order order, typename pixel_t, int div>
+-	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist);
++	void debayerBinned2x2(uint8_t *dst, const uint8_t *src[], uint16_t *hist,
++			      const uint16_t *lsc);
++	int shade(int value, unsigned int gain) const;
++	void updateLensShading(const DebayerParams &params);
++	void buildLensShadingMap(unsigned int table);
++	std::array<float, 4> lensShadingGains(const LensShading::Table &table,
++					      float x, float y) const;
+ 	int temporalFilter(uint16_t &hist, int value);
+ 	void configureTnr();
+ 
+@@ -188,6 +196,25 @@ private:
+ 	double tnrRawScale_;                       /* raw units per 10-bit unit */
+ 	bool tnrEnabled_;
+ 	bool tnrPrimed_;
++
++	/*
++	 * Lens shading on the binned path: the tuning file's tables, and for
++	 * the table nearest the current white balance a per-output-pixel gain
++	 * map (3 per pixel in the binned function's r, g, b order, 2048 = 1.0).
++	 */
++	LensShading lensShading_;
++	std::vector<uint16_t> lscMap_;
++	int lscTable_;
++	bool lscEnabled_;
++	/* Shade raw lines as they are copied (unbinned path) */
++	bool lscRaw_;
++	bool lscRawShadable_;
++	BayerFormat::Order lscRawOrder_;
++	unsigned int lscMapStride_;
++	float lscStrength_;
++	int lscBlack_;
++	int rawMax_;
++	Size inputSize_;
+ 	Rectangle window_;
+ 	std::unique_ptr<SwStatsCpu> stats_;
+ 	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 627625b..3ed83da 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "libcamera/internal/software_isp/software_isp.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ #include <stdint.h>
+@@ -15,6 +16,7 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#include <libcamera/base/file.h>
+ #include <libcamera/base/log.h>
+ #include <libcamera/base/thread.h>
+ #include <libcamera/base/utils.h>
+@@ -26,6 +28,7 @@
+ #include "libcamera/internal/bayer_format.h"
+ #include "libcamera/internal/framebuffer.h"
+ #include "libcamera/internal/software_isp/debayer_params.h"
++#include "libcamera/internal/yaml_parser.h"
+ 
+ #include "debayer_cpu.h"
+ #if HAVE_DEBAYER_EGL
+@@ -78,6 +81,80 @@ LOG_DEFINE_CATEGORY(SoftwareIsp)
+  * \param[in] sensor Pointer to the CameraSensor instance owned by the pipeline handler
+  * \param[out] ipaControls The IPA controls to update
+  */
++namespace {
++
++/*
++ * Read the optional top-level lensShading section of a tuning file. The IPA
++ * ignores top-level keys it doesn't know; the debayer applies the tables.
++ */
++std::optional<LensShading> readLensShading(const std::string &path)
++{
++	static constexpr std::array<const char *, 4> kPlanes = { "r", "gr", "gb", "b" };
++
++	File file(path);
++	if (!file.open(File::OpenModeFlag::ReadOnly))
++		return std::nullopt;
++
++	std::unique_ptr<ValueNode> root = YamlParser::parse(file);
++	if (!root || !root->contains("lensShading"))
++		return std::nullopt;
++
++	const ValueNode &node = (*root)["lensShading"];
++	std::optional<unsigned int> width = node["grid"][0].get<unsigned int>();
++	std::optional<unsigned int> height = node["grid"][1].get<unsigned int>();
++	if (!width || !height || *width < 2 || *height < 2) {
++		LOG(SoftwareIsp, Warning) << "Invalid lensShading grid in " << path;
++		return std::nullopt;
++	}
++
++	LensShading lensShading;
++	lensShading.grid = Size(*width, *height);
++	const std::size_t points = static_cast<std::size_t>(*width) * *height;
++
++	if (node.contains("arraySize")) {
++		std::optional<unsigned int> arrayWidth = node["arraySize"][0].get<unsigned int>();
++		std::optional<unsigned int> arrayHeight = node["arraySize"][1].get<unsigned int>();
++		if (arrayWidth && arrayHeight)
++			lensShading.arraySize = Size(*arrayWidth, *arrayHeight);
++	}
++	lensShading.strength = std::clamp(node["strength"].get<float>().value_or(1.0f), 0.0f, 1.0f);
++
++	for (const ValueNode &entry : node["tables"].asList()) {
++		LensShading::Table table;
++		table.whitePoint = { entry["whitePoint"][0].get<float>().value_or(0.0f),
++				     entry["whitePoint"][1].get<float>().value_or(0.0f) };
++
++		for (unsigned int i = 0; i < kPlanes.size(); i++) {
++			/* One list per grid row, as YAML lists are capped at 1000 entries */
++			const ValueNode &plane = entry[kPlanes[i]];
++			std::vector<uint16_t> &gains = table.planes[i];
++			gains.reserve(points);
++			for (const ValueNode &row : plane.asList())
++				for (const ValueNode &value : row.asList())
++					gains.push_back(value.get<uint16_t>().value_or(2048));
++
++			if (plane.size() != *height || gains.size() != points) {
++				LOG(SoftwareIsp, Warning)
++					<< "Invalid lensShading table in " << path;
++				return std::nullopt;
++			}
++		}
++
++		lensShading.tables.push_back(std::move(table));
++	}
++
++	if (lensShading.tables.empty())
++		return std::nullopt;
++
++	LOG(SoftwareIsp, Info)
++		<< "Lens shading: " << lensShading.tables.size() << " tables, "
++		<< lensShading.grid << " grid, from " << path;
++
++	return lensShading;
++}
++
++} /* namespace */
++
+ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
+ 			 ControlInfoMap *ipaControls)
+ 	: ispWorkerThread_("SWIspWorker"),
+@@ -150,6 +227,10 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
+ 	std::string ipaTuningFile =
+ 		ipa_->configurationFile(sensor->model() + ".yaml", "uncalibrated.yaml");
+ 
++	std::optional<LensShading> lensShading = readLensShading(ipaTuningFile);
++	if (lensShading)
++		debayer_->setLensShading(std::move(*lensShading));
++
+ 	IPACameraSensorInfo sensorInfo{};
+ 	int ret = sensor->sensorInfo(&sensorInfo);
+ 	if (ret) {
 -- 
-2.53.0
+2.56.0
+

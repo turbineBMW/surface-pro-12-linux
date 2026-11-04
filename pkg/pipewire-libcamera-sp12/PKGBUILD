@@ -1,0 +1,66 @@
+# PipeWire's libcamera plugin rebuilt against libcamera 0.8 (libcamera-sp12
+# 0.8.0-1.x), until Arch ships libcamera 0.8 and a pipewire built against it.
+# Only the SPA plugin is built: every other feature is disabled, and the rest
+# of PipeWire stays Arch's. Derived from Arch's pipewire PKGBUILD (David Runge,
+# Jan Alexander Steffens).
+#
+# The plugin must match the installed pipewire exactly, so pkgver and the
+# pipewire= dependency follow Arch's pipewire. When Arch moves pipewire to a
+# new version, pacman stops on this dependency: rebuild with the new pkgver
+# (and its b2sum), or drop this package once Arch's pipewire-libcamera links
+# libcamera.so.0.8.
+
+pkgname=pipewire-libcamera
+epoch=1
+pkgver=1.6.9
+_archrel=1
+pkgrel=$_archrel.1
+pkgdesc="Low-latency audio/video router and processor - Libcamera support (built against libcamera 0.8)"
+arch=(x86_64)
+url="https://pipewire.org"
+license=(MIT)
+depends=(
+  "pipewire=$epoch:$pkgver-$_archrel"
+  glibc
+  libcamera libcamera-base.so libcamera.so
+  libgcc
+  libstdc++
+)
+makedepends=(
+  git
+  'libcamera>=0.8'
+  meson
+)
+source=(
+  "git+https://gitlab.freedesktop.org/pipewire/pipewire.git#tag=$pkgver"
+  0001-spa-libcamera-device-0.8-compatibility.patch
+)
+b2sums=('85867001aac9e81a015eb042bc4766cbb6c1755a809d4fdbd838bf5433596648d222f5afb88c9a06786c76901f32a270c6cf5499fa7e2f29890357293fd5d6f7'
+        SKIP)
+
+prepare() {
+  cd pipewire
+  patch -Np1 < ../0001-spa-libcamera-device-0.8-compatibility.patch
+}
+
+build() {
+  local meson_options=(
+    --auto-features=disabled
+    -D spa-plugins=enabled
+    -D libcamera=enabled
+    -D session-managers=[]
+    -D examples=disabled
+    -D tests=disabled
+    -D man=disabled
+    -D docs=disabled
+  )
+
+  arch-meson pipewire build "${meson_options[@]}"
+  meson compile -C build spa-libcamera
+}
+
+package() {
+  install -Dm755 build/spa/plugins/libcamera/libspa-libcamera.so \
+    -t "$pkgdir/usr/lib/spa-0.2/libcamera"
+  install -Dm644 pipewire/COPYING -t "$pkgdir/usr/share/licenses/$pkgname"
+}

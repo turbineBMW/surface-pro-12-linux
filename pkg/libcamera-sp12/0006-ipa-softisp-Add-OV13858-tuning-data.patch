@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 8b6e7611c31c9de8120003f28299022c48b1fa40 Mon Sep 17 00:00:00 2001
 From: turbinebmw <turbine.bmw@gmail.com>
 Date: Thu, 24 Sep 2026 09:45:00 -0400
-Subject: [PATCH] ipa: simple: Add OV13858 tuning data
+Subject: [PATCH 06/11] ipa: softisp: Add OV13858 tuning data
 
 Add a tuning file for the OV13858 as used by the Surface Pro 12 (Intel)
 rear camera module (MSHW0741), which otherwise falls back to
@@ -10,13 +10,30 @@ Windows tuning file (OV13858_MSHW0741_PTL.aiqb): the base (global) matrix of
 each of its six illuminants, 2514 K to 6366 K. In a blind A/B comparison on a real
 scene they were preferred over no colour correction. Like the IMX681 file,
 AGC raises gain beyond a 1/60 s exposure to limit motion blur.
-
 ---
-diff --git a/src/ipa/simple/data/ov13858.yaml b/src/ipa/simple/data/ov13858.yaml
+ src/ipa/softisp/data/meson.build  |  1 +
+ src/ipa/softisp/data/ov13858.yaml | 48 +++++++++++++++++++++++++++++++
+ 2 files changed, 49 insertions(+)
+ create mode 100644 src/ipa/softisp/data/ov13858.yaml
+
+diff --git a/src/ipa/softisp/data/meson.build b/src/ipa/softisp/data/meson.build
+index effe5c9..c06fbc9 100644
+--- a/src/ipa/softisp/data/meson.build
++++ b/src/ipa/softisp/data/meson.build
+@@ -2,6 +2,7 @@
+ 
+ conf_files = files([
+     'imx681.yaml',
++    'ov13858.yaml',
+     'uncalibrated.yaml',
+ ])
+ 
+diff --git a/src/ipa/softisp/data/ov13858.yaml b/src/ipa/softisp/data/ov13858.yaml
 new file mode 100644
+index 0000000..f129b92
 --- /dev/null
-+++ b/src/ipa/simple/data/ov13858.yaml
-@@ -0,0 +1,42 @@
++++ b/src/ipa/softisp/data/ov13858.yaml
+@@ -0,0 +1,48 @@
 +# SPDX-License-Identifier: CC0-1.0
 +# SPDX-FileCopyrightText: 2026 turbinebmw
 +%YAML 1.1
@@ -56,17 +73,15 @@ new file mode 100644
 +                 -0.100, -0.793,  1.893 ]
 +  - Adjust:
 +  - Agc:
-+      # Raise gain beyond 1/60 s of exposure to limit motion blur.
-+      exposureGainThreshold: 16667
++      # Limit motion blur: expose up to 1/60 s, then raise the analogue gain
++      # to its maximum (8191/128), and only then expose longer (up to the
++      # sensor's limit). The soft ISP applies no digital gain, so the gain
++      # stage must not exceed the analogue maximum.
++      AeExposureMode:
++        Normal:
++          exposureTime: [ 16667, 1000000 ]
++          gain: [ 63.99, 63.99 ]
 +...
-diff --git a/src/ipa/simple/data/meson.build b/src/ipa/simple/data/meson.build
---- a/src/ipa/simple/data/meson.build
-+++ b/src/ipa/simple/data/meson.build
-@@ -2,6 +2,7 @@
- 
- conf_files = files([
-     'imx681.yaml',
-+    'ov13858.yaml',
-     'uncalibrated.yaml',
- ])
- 
+-- 
+2.56.0
+

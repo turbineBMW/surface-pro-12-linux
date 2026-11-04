@@ -1,19 +1,23 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 7e9c1eb6a7a4ef364e3806750ecc78e335ab73ac Mon Sep 17 00:00:00 2001
 From: turbinebmw <turbine.bmw@gmail.com>
 Date: Thu, 24 Sep 2026 09:45:00 -0400
-Subject: [PATCH] ipa: simple: imx681: Add colour correction matrices
+Subject: [PATCH 05/11] ipa: softisp: imx681: Add colour correction matrices
 
 Add CCMs for the Surface Pro 12 (Intel) front camera module (MSHW0740),
 taken from its Windows tuning file (imx681_MSHW0740_PTL.aiqb): the base
 (global) matrix of each of the file's seven illuminants, 2300 K to 6859 K.
 Each illuminant block also carries 24 hue-sector matrices after the base
-one; the simple IPA takes one matrix per colour temperature. In blind A/B comparisons on real scenes
+one; the soft ISP IPA takes one matrix per colour temperature. In blind A/B comparisons on real scenes
 these were preferred over no colour correction.
-
 ---
---- a/src/ipa/simple/data/imx681.yaml
-+++ b/src/ipa/simple/data/imx681.yaml
-@@ -9,8 +9,39 @@
+ src/ipa/softisp/data/imx681.yaml | 35 ++++++++++++++++++++++++++++++--
+ 1 file changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/src/ipa/softisp/data/imx681.yaml b/src/ipa/softisp/data/imx681.yaml
+index 7125165..90dd476 100644
+--- a/src/ipa/softisp/data/imx681.yaml
++++ b/src/ipa/softisp/data/imx681.yaml
+@@ -9,8 +9,39 @@ algorithms:
    - BlackLevel:
        blackLevel: 4096
    - Awb:
@@ -54,4 +58,7 @@ these were preferred over no colour correction.
 +                 -0.018, -0.536,  1.554 ]
    - Adjust:
    - Agc:
-       # Raise gain beyond 1/60 s of exposure to limit motion blur.
+       # Limit motion blur: expose up to 1/60 s, then raise the analogue gain
+-- 
+2.56.0
+

@@ -1,10 +1,12 @@
-# libcamera 0.7.2 with IMX681 support for the Surface Pro 12 (Intel) front
-# camera: sensor properties, the gain/black-level helper that simple-IPA AGC
-# needs, initial tuning data, and an AGC exposure/gain threshold (1/60 s) to
-# limit motion blur. Derived from Arch's libcamera PKGBUILD
-# (David Runge, Carl Smedstad); builds only libcamera, libcamera-ipa and
-# libcamera-tools, without docs, Qt, GStreamer or Python bindings.
-# pkgrel 4.x replaces Arch's 0.7.2-4; any newer Arch release supersedes it.
+# libcamera 0.8.0 for the Surface Pro 12 (Intel) cameras: IMX681 sensor
+# properties and helper; IMX681 and OV13858 tuning (CCMs, lens shading and the
+# AWB locus from the modules' Windows tuning files, AGC limited to 1/60 s
+# before gain); and, in the CPU soft ISP, 2x2 binning, temporal and chroma
+# noise reduction, lens-shading correction and grey-zone AWB statistics.
+# Derived from Arch's libcamera PKGBUILD (David Runge, Carl Smedstad); builds
+# only libcamera, libcamera-ipa and libcamera-tools, without docs, Qt,
+# GStreamer or Python bindings.
+# pkgrel 1.x ranks above Arch's 0.8.0-1; any newer Arch release supersedes it.
 
 pkgbase=libcamera
 pkgname=(
@@ -12,9 +14,9 @@ pkgname=(
   libcamera-ipa
   libcamera-tools
 )
-pkgver=0.7.2
-pkgrel=4.11
-pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 IMX681 support)"
+pkgver=0.8.0
+pkgrel=1.1
+pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 camera support)"
 arch=(x86_64)
 url="https://libcamera.org/"
 _url=https://git.libcamera.org/libcamera/libcamera.git
@@ -41,18 +43,18 @@ source=(
   "git+$_url#tag=v$pkgver"
   0001-libcamera-camera_sensor_properties-Add-IMX681.patch
   0002-libipa-camera_sensor_helper-Add-IMX681.patch
-  0003-ipa-simple-Add-initial-IMX681-tuning-data.patch
-  0004-ipa-simple-agc-Add-an-exposure-gain-threshold.patch
-  0005-ipa-simple-imx681-Add-colour-correction-matrices.patch
-  0006-ipa-simple-Add-OV13858-tuning-data.patch
+  0003-ipa-softisp-Add-initial-IMX681-tuning-data.patch
+  0004-ipa-softisp-imx681-Limit-the-exposure-time-before-ra.patch
+  0005-ipa-softisp-imx681-Add-colour-correction-matrices.patch
+  0006-ipa-softisp-Add-OV13858-tuning-data.patch
   0007-libcamera-software_isp-debayer_cpu-Add-2x2-binning.patch
-  0008-libcamera-software_isp-debayer_cpu-Add-temporal-noise-reduction.patch
-  0009-libcamera-software_isp-Add-lens-shading-correction.patch
-  0010-ipa-simple-awb-Use-grey-zones-and-the-illuminant-locus.patch
-  0011-libcamera-software_isp-Crop-by-default-raw-TNR-and-chroma-NR.patch
+  0008-libcamera-software_isp-debayer_cpu-Add-temporal-nois.patch
+  0009-libcamera-software_isp-Add-lens-shading-correction-t.patch
+  0010-ipa-softisp-awb-Average-the-zones-that-could-be-grey.patch
+  0011-libcamera-software_isp-Crop-by-default-raw-TNR-and-c.patch
   configuration.yaml
 )
-sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
+sha512sums=('8afd6af63d062c534b4e071707770260ae9417856256d6cd49315153efbed474a8d29496bda4f2dca1b14b4aa7bfad4dd0b001a6ba0d18898e7bec8cb99b0436'
             SKIP
             SKIP
             SKIP

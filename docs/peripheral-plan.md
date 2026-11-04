@@ -1010,13 +1010,48 @@ cameras, IR, face unlock and the snoop fix all work.**
 - **Step 3 done.**
 
 **Related, after the port:**
-- **libcamera v0.8.0** (2026-11-01): GPU soft-ISP lens shading, the simple IPA on libipa's
-  CcmAlgorithm, saturated pixels out of the AWB stats. These overlap our `0006`/`0009`/`0010`.
-  Rebase libcamera-sp12 and move the `.aiqb` tables onto the upstream tuning format
-  where it fits.
-- **GPU ISP:** "debayer_egl: Fix texture sampling steps" (patchwork 28702, 2026-10-29,
-  unreviewed) fixes Bayer row offsets when scaling. Try it against the IMX681 downscale
-  aliasing. Multi-pass GPU ISP is still only the 2026-06 RFC.
+- **libcamera v0.8.0** (2026-11-01): **done, libcamera-sp12 0.8.0-1.1** (2026-11-04).
+  Series in `private/camera/libcamera` branch `sp12/0.8.0` (`sp12/0.7.2` is the
+  old one rebuilt from the package patches). Upstream renamed the IPA to
+  `softisp` (tuning files now in `/usr/share/libcamera/ipa/softisp/`) and moved
+  AGC, AWB and CCM onto libipa:
+  - `0004` (AGC threshold) is tuning only now: `AeExposureMode` stages of
+    1/60 s, then gain to the analogue maximum (IMX681 16x, OV13858 8191/128),
+    then longer exposure. The soft ISP applies no digital gain, so a stage gain
+    above the analogue maximum would stall the helper.
+  - `0010` (AWB) keeps the 16x12 zone statistics and grey-zone selection and
+    feeds their colour to libipa's Bayes AWB, with the locus as `colourGains`
+    (1/(R/G), 1/(B/G)), a flat prior, `transversePos/Neg` 0.06 (was
+    `offLocus`) and an `AwbMode` Auto range over the locus (Bayes requires
+    one). libipa's fixed 0.2 smoothing equals our old `speed`. The zones count
+    every pixel; upstream's global sums exclude saturated ones.
+  - `0005`/`0006` CCMs carry over (same `ccms`/`ct`/`ccm` keys). Upstream LSC
+    (17x17, IPA `Lsc` algorithm) only reaches the GPU debayer, and we run the
+    CPU ISP, so our `0009` LSC (63x47 `.aiqb` tables, top-level `lensShading`)
+    stays. `0011` uses `PixelFormatInfo` for the output bytes per pixel
+    (upstream dropped `DebayerOutputConfig::bpp`).
+  - A/B against 0.7.2, CPU ISP 1080p: same fps (29.95 rear, 30.01 front),
+    AWB gains and CT within a few percent. The front is no longer
+    overexposed (mean 148 vs 194; upstream's mean-luminance AGC).
+  - libcamera's soname moved to 0.8, so `pkg/pipewire-libcamera-sp12` rebuilds
+    PipeWire 1.6.9's libcamera plugin (only that plugin) against it, with
+    upstream's 0.8 compatibility fix (54f2f51) backported. Its `pipewire=`
+    dependency is exact: when Arch updates pipewire, rebuild it at the new
+    version, or drop it once Arch's pipewire-libcamera links 0.8. Install
+    order on a 0.7 system: `pacman -Rdd pipewire-libcamera`, install
+    libcamera 0.8, build and install the plugin.
+  - Still open: the IR sensor makes libcamera log "Unable to set controls:
+    Permission denied" before it's skipped (also on 0.7.2 with 7.4); the IR
+    camera is used through `/dev/sp12-ir`, not libcamera.
+- **GPU ISP: tried 2026-11-04, CPU ISP stays.** "debayer_egl: Fix texture sampling
+  steps" (patchwork 28702, 2026-10-29, unreviewed: step 1/stride and 1/height instead
+  of 1/(stride-1), 1/(height-1)) on libcamera-sp12 0.8.0, front camera 1920x1080:
+  the frame breaks into rectangular tiles of different colour casts with magenta and
+  cyan vertical stripes (Bayer phase flipping by region once the step is exactly one
+  texel), `gridscore` 1.00. Without it, 0.8.0's GPU ISP shows no obvious 1-px grid at
+  4x (score 0.94 vs 0.72 on the CPU; the GPU path has no TNR/CNR, so pixel noise
+  raises the score). The CPU ISP stays the default anyway: our binning, TNR, CNR and
+  LSC are CPU-only. Multi-pass GPU ISP is still only the 2026-06 RFC.
 - **Watch:** soft-ISP temporal denoise (Božik, unmerged) and the AIQB-to-simple-IPA parser
   (Tia, v3) overlap our TNR/`.aiqb` work. intel/ipu7-drivers #102: OV08F4 stalls on 7.2.x.
 - **PSYS stays blocked:** ipu7-camera-hal's 2026-09-26 release still has no graph

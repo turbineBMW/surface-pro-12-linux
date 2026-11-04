@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 2c38511300b11155156f8ad5d1caaa1a2066cac7 Mon Sep 17 00:00:00 2001
 From: turbinebmw <turbine.bmw@gmail.com>
 Date: Thu, 24 Sep 2026 10:30:00 -0400
-Subject: [PATCH] libcamera: software_isp: debayer_cpu: Add 2x2 binning
+Subject: [PATCH 07/11] libcamera: software_isp: debayer_cpu: Add 2x2 binning
 
 The CPU debayer can't scale: an output smaller than the sensor is cropped
 from the centre of the full-size debayered image. On sensors without a
@@ -17,11 +17,16 @@ output pixel. Statistics still run on the full-resolution window.
 Unpacked 8/10/12-bit standard Bayer orders only; other formats and larger
 outputs keep the existing path. Input lines are copied exactly (no
 padding), since a binned window can start at the buffer's first byte.
-
 ---
+ src/libcamera/software_isp/debayer_cpu.cpp | 157 ++++++++++++++++++++-
+ src/libcamera/software_isp/debayer_cpu.h   |  13 ++
+ 2 files changed, 163 insertions(+), 7 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_cpu.cpp b/src/libcamera/software_isp/debayer_cpu.cpp
+index 91867ba..bc06dec 100644
 --- a/src/libcamera/software_isp/debayer_cpu.cpp
 +++ b/src/libcamera/software_isp/debayer_cpu.cpp
-@@ -50,6 +50,7 @@
+@@ -51,6 +51,7 @@ private:
  	void memcpyNextLine(const uint8_t *linePointers[]);
  	void process2(uint32_t frame, const uint8_t *src, uint8_t *dst);
  	void process4(uint32_t frame, const uint8_t *src, uint8_t *dst);
@@ -29,7 +34,7 @@ padding), since a binned window can start at the buffer's first byte.
  
  	/* Max. supported Bayer pattern height is 4, debayering this requires 5 lines */
  	static constexpr unsigned int kMaxLineBuffers = 5;
-@@ -428,6 +429,94 @@
+@@ -429,6 +430,94 @@ void DebayerCpu::debayer12P_RGRG_BGR888(uint8_t *dst, const uint8_t *src[])
   * Return 0 on success, a negative errno value on failure
   * (unsupported parameters).
   */
@@ -124,7 +129,7 @@ padding), since a binned window can start at the buffer's first byte.
  int DebayerCpu::getInputConfig(PixelFormat inputFormat, DebayerInputConfig &config)
  {
  	BayerFormat bayerFormat =
-@@ -536,6 +625,7 @@
+@@ -519,6 +608,7 @@ int DebayerCpu::setDebayerFunctions(PixelFormat inputFormat,
  
  	xShift_ = 0;
  	swapRedBlueGains_ = false;
@@ -132,7 +137,7 @@ padding), since a binned window can start at the buffer's first byte.
  
  	auto invalidFmt = []() -> int {
  		LOG(Debayer, Error) << "Unsupported input output format combination";
-@@ -593,6 +683,7 @@
+@@ -576,6 +666,7 @@ int DebayerCpu::setDebayerFunctions(PixelFormat inputFormat,
  			break;
  		}
  		setupStandardBayerOrder(bayerFormat.order);
@@ -140,7 +145,7 @@ padding), since a binned window can start at the buffer's first byte.
  		return 0;
  	}
  
-@@ -696,12 +787,28 @@
+@@ -683,12 +774,28 @@ int DebayerCpu::configure(const StreamConfiguration &inputCfg,
  	 */
  	params_.gamma = 1.0;
  
@@ -173,25 +178,24 @@ padding), since a binned window can start at the buffer's first byte.
  
  	/*
  	 * Set the stats window to the whole processed window. Its coordinates are
-@@ -844,10 +951,13 @@
+@@ -825,10 +932,13 @@ void DebayerCpuThread::process(uint32_t frame, const uint8_t *src, uint8_t *dst)
  	/* Adjust src to top left corner of the window */
  	src += (window.y + yStart_) * debayer_->inputConfig_.stride +
  	       window.x * debayer_->inputConfig_.bpp / 8;
 -	/* Adjust dst for yStart_ */
 -	dst += yStart_ * debayer_->outputConfig_.stride;
--
--	if (debayer_->inputConfig_.patternSize.height == 2)
 +	/* Adjust dst for yStart_ (window lines; binning halves them) */
 +	dst += (debayer_->binning_ ? yStart_ / 2 : yStart_) *
 +	       debayer_->outputConfig_.stride;
-+
+ 
+-	if (debayer_->inputConfig_.patternSize.height == 2)
 +	if (debayer_->binning_)
 +		processBinned(frame, src, dst);
 +	else if (debayer_->inputConfig_.patternSize.height == 2)
  		process2(frame, src, dst);
  	else
  		process4(frame, src, dst);
-@@ -858,6 +968,39 @@
+@@ -839,6 +949,39 @@ void DebayerCpuThread::process(uint32_t frame, const uint8_t *src, uint8_t *dst)
  	debayer_->workPendingCv_.notify_one();
  }
  
@@ -231,9 +235,11 @@ padding), since a binned window can start at the buffer's first byte.
  void DebayerCpuThread::process2(uint32_t frame, const uint8_t *src, uint8_t *dst)
  {
  	unsigned int outputStride = debayer_->outputConfig_.stride;
+diff --git a/src/libcamera/software_isp/debayer_cpu.h b/src/libcamera/software_isp/debayer_cpu.h
+index ae57089..2b6cd4a 100644
 --- a/src/libcamera/software_isp/debayer_cpu.h
 +++ b/src/libcamera/software_isp/debayer_cpu.h
-@@ -85,6 +85,15 @@
+@@ -86,6 +86,15 @@ private:
  	void debayer1(uint8_t *dst, const uint8_t *src[]) { (this->*debayer1_)(dst, src); }
  	void debayer2(uint8_t *dst, const uint8_t *src[]) { (this->*debayer2_)(dst, src); }
  	void debayer3(uint8_t *dst, const uint8_t *src[]) { (this->*debayer3_)(dst, src); }
@@ -249,15 +255,15 @@ padding), since a binned window can start at the buffer's first byte.
  
  	/* 8-bit raw bayer format */
  	template<bool addAlphaByte, bool ccmEnabled>
-@@ -123,6 +132,7 @@
+@@ -123,6 +132,7 @@ private:
+ 
  	static int getInputConfig(PixelFormat inputFormat, DebayerInputConfig &config);
- 	static int getOutputConfig(PixelFormat outputFormat, DebayerOutputConfig &config);
  	int setupStandardBayerOrder(BayerFormat::Order order);
 +	void setBinnedFunction(const BayerFormat &bayerFormat, bool addAlphaByte, bool ccmEnabled);
  	int setDebayerFunctions(PixelFormat inputFormat,
  				PixelFormat outputFormat,
  				bool ccmEnabled);
-@@ -153,6 +163,9 @@
+@@ -153,6 +163,9 @@ private:
  	debayerFn debayer1_;
  	debayerFn debayer2_;
  	debayerFn debayer3_;
@@ -267,3 +273,6 @@ padding), since a binned window can start at the buffer's first byte.
  	Rectangle window_;
  	std::unique_ptr<SwStatsCpu> stats_;
  	unsigned int xShift_; /* Offset of 0/1 applied to window_.x */
+-- 
+2.56.0
+
