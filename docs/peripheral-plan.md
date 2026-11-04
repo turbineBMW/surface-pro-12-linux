@@ -934,7 +934,7 @@ IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
    Y8 644x604, emitter strobe), face unlock, and the snoop dashes gone under motion.
 4. Upstream `0016` against ipu6 (linux-media), not staging (see Post-work).
 
-**Progress (2026-11-04): steps 1 and 2 done, step 3 mostly done (below).**
+**Progress (2026-11-04): steps 1–3 done (below).**
 - Worktree `~/Projects/linux-7.4`, branch `sp12/7.4` on v7.4-rc1: the series
   rebased, one commit per patch. Exported as `dkms/patches-7.4/` (same numbers;
   applying it to v7.4-rc1 reproduces the branch exactly).
@@ -962,7 +962,7 @@ IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
   `Intel IPU7* ISYS Capture 8`.
 
 **Step 3 (2026-11-04, test kernel `7.4.0-rc1-sp12` built from `sp12/7.4`):
-cameras work; face unlock and the dashes under motion still to check.**
+cameras, IR, face unlock and the snoop fix all work.**
 - ipu6 claims the IPU (`intel-ipu6`, model `ipu7.5`) and all three sensors
   bind: OV13858 on CSI2 0 (4 lanes), VD55G0 on CSI2 1 (1 lane), IMX681 on
   CSI2 2. libcamera lists the rear (camera 1, OV13858) and front (camera 2,
@@ -993,8 +993,21 @@ cameras work; face unlock and the dashes under motion still to check.**
   all complete, no kernel errors. The DKMS path builds the same
   `srcversion`s as the tested modules. `prepare-sources.sh` now maps RC
   kernels to their tag (`7.4.0-rc1-sp12` → `v7.4-rc1`).
-- Left: face unlock (Facelock on `/dev/sp12-ir`), and the snoop dashes under
-  motion on both RGB cameras (`0016`).
+- Face unlock works (`facelock test` and the lock screen). The Facelock IR
+  quirk (private, `60-sp12-ir.toml`) matched the card name `ipu7`, anchored.
+  Under ipu6 the card is `ipu7.5`, which gave "IR camera required". The
+  pattern is now `ipu7.*`; restart `facelock-daemon` after a quirk change.
+- Dashes under motion (`0016`), 1920x1080 CPU ISP, `dashscore` over 80
+  frames while moving: front 30 (worst frame 3), rear 1100 (worst 43). The
+  rear runs are colour fringes along clipped window-blind slat edges: they
+  stack over adjacent rows, are not on a 32-pixel grid, and 86% of their
+  pixels are within 4 rows of a saturated pixel. Only 25 of 1096 runs (none
+  on the front) match the previous frame more than their neighbours do, the
+  signature of stale data, and all 25 are on the blinds (a periodic pattern
+  that pans onto itself). None are on unclipped edges, so there are no snoop
+  dashes; `0016` holds on 7.4. `dashscore` counts clipped horizontal edges,
+  so keep windows out of frame for A/B runs.
+- **Step 3 done.**
 
 **Related, after the port:**
 - **libcamera v0.8.0** (2026-11-01): GPU soft-ISP lens shading, the simple IPA on libipa's
