@@ -28,3 +28,6 @@ limine/qemu/mu_tiano_platforms/
 limine/qemu/out/
 limine/qemu/esp/
 limine/qemu/*.log
+
+# Python bytecode caches.
+__pycache__/
