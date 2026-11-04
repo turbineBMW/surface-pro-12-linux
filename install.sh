@@ -23,7 +23,7 @@ fi
 rm -rf "/usr/src/$name-$ver"
 mkdir -p "/usr/src/$name-$ver"
 cp -r "$here/dkms/dkms.conf" "$here/dkms/Makefile" "$here/dkms/prepare-sources.sh" \
-      "$here/dkms/patches" "/usr/src/$name-$ver/"
+      "$here/dkms/patches" "$here/dkms/patches-7.4" "/usr/src/$name-$ver/"
 dkms add -m "$name" -v "$ver"
 dkms install -m "$name" -v "$ver" -k "$kver"
 

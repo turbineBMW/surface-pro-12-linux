@@ -1,0 +1,17 @@
+Subject: media: ipu-bridge: add the Surface Pro 12 (Intel) IR camera
+
+ST VD55G0 (ACPI SMO55F0), one lane at 840 Mbps: link frequency 420 MHz.
+---
+diff --git a/drivers/media/pci/intel/ipu-bridge.c b/drivers/media/pci/intel/ipu-bridge.c
+index 5640370334fb..11c070f18f9e 100644
+--- a/drivers/media/pci/intel/ipu-bridge.c
++++ b/drivers/media/pci/intel/ipu-bridge.c
+@@ -120,6 +120,8 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
+ 	IPU_SENSOR_CONFIG("OVTI5693", 1, 419200000),
+ 	/* Omnivision OV8856 */
+ 	IPU_SENSOR_CONFIG("OVTI8856", 3, 180000000, 360000000, 720000000),
++	/* ST VD55G0 (IR) */
++	IPU_SENSOR_CONFIG("SMO55F0", 1, 420000000),
+ 	/* Sony IMX471 */
+ 	IPU_SENSOR_CONFIG("SONY471A", 1, 200000000),
+ 	/* Sony IMX681 */

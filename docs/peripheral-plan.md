@@ -897,7 +897,7 @@ Hardware check (2026-11-04, tools 1.26, keyboard brought back from the SP11):
   with the bond in place, as its message allows. It re-sends the host address to
   prompt the report, so the help no longer says "change nothing".
 
-### Phase 9: kernel 7.4 and the camera stack (next session starts here)
+### Phase 9: kernel 7.4 and the camera stack (in progress)
 Survey on 2026-11-04 (running 7.2.8-9-omarchy). The 7.4-rc1 commits below were checked in
 `~/Projects/linux` (`git describe --contains`). The rest is from a web survey, with links.
 
@@ -933,6 +933,81 @@ IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
 3. Test on hardware: both RGB cameras through libcamera, the IR camera (`/dev/sp12-ir`,
    Y8 644x604, emitter strobe), face unlock, and the snoop dashes gone under motion.
 4. Upstream `0016` against ipu6 (linux-media), not staging (see Post-work).
+
+**Progress (2026-11-04): steps 1–3 done (below).**
+- Worktree `~/Projects/linux-7.4`, branch `sp12/7.4` on v7.4-rc1: the series
+  rebased, one commit per patch. Exported as `dkms/patches-7.4/` (same numbers;
+  applying it to v7.4-rc1 reproduces the branch exactly).
+- Rebase changes: `0006` uses the new `.id =` ACPI table style. `0010` takes the
+  `client_info` pad-op argument (the only sensor that needed it; ov13858 and
+  vd55g1 were converted upstream). `0011` drops OVTID858 (upstream since
+  2ee01a094aba, same frequencies). `0017` adds the VD55G0 as a fourth entry in
+  vd55g1's new version table (vd55g4 support, 7a1e5239ae63) and skips the
+  colour-version read for it (0x0670, never read on our hardware). `0018` joins
+  SMO55F0 to the new upstream ACPI table (TBE20A1).
+- `0016` is now `media: ipu6: ipu7: ...`, setting `is_snoop` in
+  `ipu7-fw-isys.c`. `0020`/`0021` are dropped: ipu6's table already has
+  GREY/Y10/Y10P, the CSI-2 receiver accepts Y8/Y10, and ipu6 passes its IPU6
+  frame-format codes to IPU7 firmware, which are equal to IPU7's
+  (RAW8 = 20, RAW10 = 21, RAW16 = 24).
+- DKMS 1.15: `prepare-sources.sh` and `dkms.conf` pick `patches-7.4/` and build
+  `intel-ipu6-isys` for 7.4+, or `patches/` and `intel-ipu7-isys` before 7.4.
+  Arch already builds `VIDEO_INTEL_IPU6=m`, and `VIDEO_INTEL_IPU6_IPU7`
+  defaults to y, so ipu6 claims the IPU on 7.4. Both paths build all 13
+  modules (7.2.8 headers; the 7.4 tree with modpost warnings only).
+- Our IPU is 8086:b05d, **IPU 7.5** (Panther Lake). Under ipu6 the entities
+  are named `Intel IPU7.5 CSI2 1` / `Intel IPU7.5 ISYS Capture 8` and the media
+  driver is `intel-ipu6` (libcamera's simple pipeline already lists it).
+  `sp12-ir-graph` reads the prefix from the graph; the udev rule matches
+  `Intel IPU7* ISYS Capture 8`.
+
+**Step 3 (2026-11-04, test kernel `7.4.0-rc1-sp12` built from `sp12/7.4`):
+cameras, IR, face unlock and the snoop fix all work.**
+- ipu6 claims the IPU (`intel-ipu6`, model `ipu7.5`) and all three sensors
+  bind: OV13858 on CSI2 0 (4 lanes), VD55G0 on CSI2 1 (1 lane), IMX681 on
+  CSI2 2. libcamera lists the rear (camera 1, OV13858) and front (camera 2,
+  IMX681). Both stream and converge to normal images.
+- IR: tools 1.27 (the IPU7.5-aware rule and `sp12-ir-graph`) brings up
+  `/dev/sp12-ir`. ipu6's default route carries Y8 to Capture 8: GREY 644x604,
+  every frame complete, emitter on alternate frames (mean ~101 lit, ~15 dark).
+- **`0027` (ISYS):** IPU7 firmware acks FLUSH and CLOSE without returning the
+  2–3 buffers it still holds (SOF, never PIN_DATA_READY). ipu6's
+  `return_buffers()` then sets `need_reset`, and every `open()` fails with
+  EIO ("isys power cycle required"). The flag is set after the stream drops
+  its runtime-PM reference, so the suspend that should clear it can come
+  first: on stock 7.4-rc1 the camera opened after an IR stream failed until
+  something else cycled the ISYS. Staging ipu7 returned these buffers without
+  a reset (and closed the firmware per stream). `0027` skips the flag on
+  IPU7. Kept awake by a 450-frame front stream, five IR start/stops on the
+  firmware without a reset each got every frame, and the front stream lost
+  none. **Upstream candidate** (linux-media, with `0016`): the ordering bug
+  hits IPU6 too.
+- **`0028` (VD55G0 power):** the rear's 4-lane port 0 aggregates PHY 0 and
+  PHY 1, and the IR lane is on PHY 1. While the VD55G0 is powered (even in
+  standby), the rear camera gets PHY ready but no SOF, and stop/close time
+  out. vd55g1's 4 s autosuspend kept it powered after every IR stream: rear
+  0 s and 3 s after IR failed, 8 s and 15 s worked. `0028` suspends at
+  stream stop. The two cameras can never stream at the same time (Windows
+  can't either, presumably).
+- With both, 24 streams in every order (IR→rear, IR→front→rear, rear→IR)
+  all complete, no kernel errors. The DKMS path builds the same
+  `srcversion`s as the tested modules. `prepare-sources.sh` now maps RC
+  kernels to their tag (`7.4.0-rc1-sp12` → `v7.4-rc1`).
+- Face unlock works (`facelock test` and the lock screen). The Facelock IR
+  quirk (private, `60-sp12-ir.toml`) matched the card name `ipu7`, anchored.
+  Under ipu6 the card is `ipu7.5`, which gave "IR camera required". The
+  pattern is now `ipu7.*`; restart `facelock-daemon` after a quirk change.
+- Dashes under motion (`0016`), 1920x1080 CPU ISP, `dashscore` over 80
+  frames while moving: front 30 (worst frame 3), rear 1100 (worst 43). The
+  rear runs are colour fringes along clipped window-blind slat edges: they
+  stack over adjacent rows, are not on a 32-pixel grid, and 86% of their
+  pixels are within 4 rows of a saturated pixel. Only 25 of 1096 runs (none
+  on the front) match the previous frame more than their neighbours do, the
+  signature of stale data, and all 25 are on the blinds (a periodic pattern
+  that pans onto itself). None are on unclipped edges, so there are no snoop
+  dashes; `0016` holds on 7.4. `dashscore` counts clipped horizontal edges,
+  so keep windows out of frame for A/B runs.
+- **Step 3 done.**
 
 **Related, after the port:**
 - **libcamera v0.8.0** (2026-11-01): GPU soft-ISP lens shading, the simple IPA on libipa's

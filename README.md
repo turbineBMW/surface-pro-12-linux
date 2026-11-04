@@ -32,6 +32,8 @@ UEFI 12.15.143, kernels `7.2.6-arch2-1` and `linux-omarchy` 7.2.5.
   `nxp-nci_i2c`. `prepare-sources.sh`
   fetches the exact sources for the kernel being built (Arch `-archN` tags, or
   upstream stable tags for e.g. `linux-omarchy`), or uses a bundled `cache/`.
+  Kernels before 7.4 use `patches/` and the staging `intel-ipu7-isys`; 7.4 and
+  later use `patches-7.4/` and `intel-ipu6-isys`, which drives IPU7 from 7.4.
 - `userspace/` — `sp12-flex-pair` (Flex Keyboard Bluetooth pairing over the
   wired OOB channel), reconnect-on-detach (udev rule + service), the
   libcamera software-ISP default (`environment.d`), and the NFC reader daemon
@@ -88,7 +90,7 @@ plugin, scripts, PKGBUILDs and docs) is under the MIT license, see `LICENSE`.
 Exceptions:
 
 - **Patches** are under the license of the project they patch: the Linux kernel
-  (`dkms/patches`, GPL-2.0-only), libcamera (`pkg/libcamera-sp12`,
+  (`dkms/patches*`, GPL-2.0-only), libcamera (`pkg/libcamera-sp12`,
   LGPL-2.1-or-later), BlueZ (`pkg/bluez-sp12`, GPL-2.0-or-later) and Limine
   (`limine/patches`, `pkg/limine`, BSD-2-Clause).
 - **Arch packaging:** `pkg/bluez-sp12` and `pkg/libcamera-sp12/PKGBUILD` derive

@@ -1,0 +1,33 @@
+Subject: media: i2c: vd55g1: power the VD55G0 off when it stops streaming
+
+On the Surface Pro 12 (Intel) the rear OV13858 is a 4-lane link on CSI-2
+port 0, which aggregates PHY 0 and PHY 1, and the VD55G0 IR sensor's
+lane is on port 1, PHY 1. While the VD55G0 is powered, even in software
+standby, the rear camera starts with both PHYs ready but never sees a
+start of frame, and the ISYS stream stop and close time out.
+
+After an IR stream the sensor stays powered for the 4 s autosuspend
+delay, so opening the rear camera within that time failed every time
+(0 s and 3 s after: no frames; 8 s and 15 s: fine). Suspend at once
+when the VD55G0 stops streaming. IR then rear back to back now streams
+on every attempt.
+---
+diff --git a/drivers/media/i2c/vd55g1.c b/drivers/media/i2c/vd55g1.c
+index 72bb0d823719..65a5f2b5f8db 100644
+--- a/drivers/media/i2c/vd55g1.c
++++ b/drivers/media/i2c/vd55g1.c
+@@ -1305,7 +1305,13 @@ static int vd55g0_disable_streams(struct vd55g1 *sensor)
+ 	if (ret)
+ 		dev_warn(sensor->dev, "vd55g0 stream stop failed %d\n", ret);
+ 
+-	pm_runtime_put_autosuspend(sensor->dev);
++	/*
++	 * On the Surface Pro 12 the rear camera's 4-lane link uses the PHY
++	 * this sensor's lane is on, and a powered VD55G0 keeps the rear
++	 * camera from starting. Power off now rather than after the
++	 * autosuspend delay.
++	 */
++	pm_runtime_put_sync_suspend(sensor->dev);
+ 
+ 	return ret;
+ }
