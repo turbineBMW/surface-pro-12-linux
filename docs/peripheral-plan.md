@@ -882,7 +882,20 @@ Not carried:
   Bluetooth; here the hwdb marks the touchpad internal (palm detection on) and the
   quirk adds `ModelTabletModeNoSuspend`, which covers it.
 
-Hardware check pending: the Flex Keyboard was on the SP11 during the port.
+Hardware check (2026-11-04, tools 1.26, keyboard brought back from the SP11):
+- **Attach** with the bond the SP11 had re-keyed: the bond didn't connect, a controller
+  reset didn't help, so it was replaced and paired over the wire on the first try,
+  about 60 s with no input. The 7.5-11.25 ms interval was stored.
+- **Detach:** typing over Bluetooth at once (the link was already up from the pairing).
+- **Re-attach** with a working bond: "bond healthy; nothing to do" within 0.1 s.
+- **Pairable:** on before and after. The adapter's settings file is empty, so BlueZ's
+  default is pairable here (the 10-13 run didn't have to turn it on either).
+- **Suspend** with the keyboard attached (2.5 min s2idle, the Bluetooth link kept):
+  the touchpad hook ran as its own job 0.08 s after resume and found touchpad mode
+  with both switches on, so it logged nothing.
+- **`--status`** found the channel and capability; no device report came within 20 s
+  with the bond in place, as its message allows. It re-sends the host address to
+  prompt the report, so the help no longer says "change nothing".
 
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
