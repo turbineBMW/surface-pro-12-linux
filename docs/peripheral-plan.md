@@ -897,11 +897,72 @@ Hardware check (2026-11-04, tools 1.26, keyboard brought back from the SP11):
   with the bond in place, as its message allows. It re-sends the host address to
   prompt the report, so the help no longer says "change nothing".
 
+### Phase 9: kernel 7.4 and the camera stack (next session starts here)
+Survey on 2026-11-04 (running 7.2.8-9-omarchy). The 7.4-rc1 commits below were checked in
+`~/Projects/linux` (`git describe --contains`). The rest is from a web survey, with links.
+
+**Why now:** v7.4-rc1 (2026-11-01) moves IPU7 into the mainline **ipu6** driver, and our
+IPU7 patches target the staging ipu7 driver. Arch will move to 7.4 within weeks.
+- `2f4ffd14b6c0` "media: ipu6: Enable support for IPU 7 and IPU 7.5":
+  `CONFIG_VIDEO_INTEL_IPU6_IPU7` defaults to y. Built in, staging ipu7 probes only with
+  `intel_ipu7.force_probe=1`. ipu6 has `force_no_probe_ipu7` for the reverse.
+- `9d6b3fa3f5bd`: the staging TODO now says the driver "will be removed soon in favour
+  of supporting IPU7 and later in the ipu6 driver".
+- `f21f57ca4e55` "media: ipu6: Add the ipu7 psys buttress support": upstream PSYS will
+  build on ipu6 (no PSYS series found; lore wasn't reachable from the survey).
+- `7eef49c16461`: v4l2-subdev pad ops (`get_fmt`/`set_fmt`/`get/set_selection`) take a
+  `struct v4l2_subdev_client_info *`. This affects our sensor drivers.
+
+**Affected patches:**
+- **IPU7 ISYS (staging, to move to ipu6):**
+  - `0016` the snoop fix. The ipu6 IPU7 output pin is memset and never sets
+    `link.is_snoop`, so it's still needed.
+  - `0020`/`0021` Y10/Y10P/GREY. ipu6's table has GREY/Y10/Y10P/Y12. Check that the
+    frame-format codes are right for IPU7 firmware.
+- **Sensors (pad-op signature):** `0010`, `0012`–`0015` imx681; `0009` ov13858;
+  `0017`/`0018`/`0022`/`0023` vd55g1.
+- **Bridge:** `0011`/`0019` ipu-bridge entries (likely unchanged; check).
+- **Userspace:** `sp12-ir-camera.service` / `70-sp12-ir-camera.rules` link CSI2 1 to ISYS
+  Capture 8 by entity name. Check the entity names under ipu6.
+
+**Plan:**
+1. A worktree of `~/Projects/linux` at v7.4-rc1. Build ipu6 with IPU7 plus our sensor
+   drivers, and port `0016`/`0020`/`0021` onto ipu6 and the pad-op changes onto the sensors.
+2. DKMS: carry ipu6 (=m in Arch's config? check) or keep staging via `force_probe` as a
+   stopgap. Decide once Arch's 7.4 config is known.
+3. Test on hardware: both RGB cameras through libcamera, the IR camera (`/dev/sp12-ir`,
+   Y8 644x604, emitter strobe), face unlock, and the snoop dashes gone under motion.
+4. Upstream `0016` against ipu6 (linux-media), not staging (see Post-work).
+
+**Related, after the port:**
+- **libcamera v0.8.0** (2026-11-01): GPU soft-ISP lens shading, the simple IPA on libipa's
+  CcmAlgorithm, saturated pixels out of the AWB stats. These overlap our `0006`/`0009`/`0010`.
+  Rebase libcamera-sp12 and move the `.aiqb` tables onto the upstream tuning format
+  where it fits.
+- **GPU ISP:** "debayer_egl: Fix texture sampling steps" (patchwork 28702, 2026-10-29,
+  unreviewed) fixes Bayer row offsets when scaling. Try it against the IMX681 downscale
+  aliasing. Multi-pass GPU ISP is still only the 2026-06 RFC.
+- **Watch:** soft-ISP temporal denoise (Božik, unmerged) and the AIQB-to-simple-IPA parser
+  (Tia, v3) overlap our TNR/`.aiqb` work. intel/ipu7-drivers #102: OV08F4 stalls on 7.2.x.
+- **PSYS stays blocked:** ipu7-camera-hal's 2026-09-26 release still has no graph
+  settings for IMX681/OV13858/VD55G0. ipu7-drivers fixed #63's layout (858ab56), but
+  its PSYS still needs Intel's core patches (`patch/v7.0.0_iot/0001`, `0005`).
+- **Compare:** onuralpszr/xps-fedora#45 switched to Intel's own ISYS for Y10 on an IR
+  sensor and a CSI-2 oops fix. Check whether it overlaps `0020`/`0021`.
+
+**Other open items carried forward:**
+- Port the SP11's native pen pairing (`surface-pro-11-pen-pair`: LE privacy on while
+  pairing, so the pen gets an identity key and click-reconnects). That answers 8a's
+  "touch-to-pair without Windows", and brings the autopair privacy waits (8e) with it.
+- The upstream submissions under Post-work. `0008` is committed in `~/Projects/linux-tabletsw`
+  and waits for the user's sign-off.
+
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
   ~13% CPU from boot. Include the payload layout `{source, old, new}`, the
   sources-list replay trigger, and the before/after numbers.
-- **IPU7 ISYS snoop (`0016`):** linux-media (staging ipu7 maintainers). Stale-cache
+- **IPU7 ISYS snoop (`0016`):** linux-media, against the **ipu6** driver's IPU7 support (7.4+;
+  staging ipu7 is being removed, see Phase 9). Stale-cache
   dashes on any IPU7 laptop with libcamera's soft ISP; one-line fix, before/after
   evidence.
 - **libcamera:** the IMX681 helper/properties (`pkg/libcamera-sp12` 0001–0003), the
