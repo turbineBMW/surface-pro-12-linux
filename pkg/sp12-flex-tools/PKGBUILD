@@ -1,6 +1,6 @@
 # Surface Pro 12 (Intel) userspace: Flex Keyboard Bluetooth pairing over the
-# wired connector, reconnect on detach and Bluetooth touchpad/keyboard
-# integration; Slim Pen pairing and Windows bond import; the libcamera software-ISP default and the
+# wired connector, reconnect on detach, Bluetooth touchpad/keyboard
+# integration and touchpad mode after resume; Slim Pen pairing and Windows bond import; the libcamera software-ISP default and the
 # front camera field-of-view switch; the battery charge limit; keyboard wake;
 # the OLED PSR setting; the IR
 # camera wiring; the ambient light sensor stream; and the NFC reader daemon
@@ -8,7 +8,7 @@
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.25
+pkgver=1.26
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream, NFC reader"
 arch=('any')
@@ -16,6 +16,10 @@ license=('MIT')
 options=('!debug')
 depends=('python' 'bluez' 'bluez-utils' 'v4l-utils' 'sp12-modules-dkms')
 optdepends=('libcamera: cameras' 'pipewire-libcamera: cameras in PipeWire apps and browsers')
+
+check() {
+	bash "${startdir}/test.sh"
+}
 
 package() {
 	local u="${startdir}/../../userspace"
@@ -65,6 +69,8 @@ package() {
 		"${pkgdir}/usr/lib/udev/hwdb.d/61-sp12-flex-touchpad.hwdb"
 	install -Dm644 "$u/usr/share/libinput/60-sp12-flex-keyboard.quirks" \
 		"${pkgdir}/usr/share/libinput/60-sp12-flex-keyboard.quirks"
+	install -Dm755 "$u/usr/lib/systemd/system-sleep/sp12-touchpad-mode" \
+		"${pkgdir}/usr/lib/systemd/system-sleep/sp12-touchpad-mode"
 	sed 's|/usr/local/libexec/sp12-flex-bt-autoconnect|/usr/lib/sp12/sp12-flex-bt-autoconnect|' \
 		"$u/etc/systemd/system/sp12-flex-bt-connect.service" \
 		| install -Dm644 /dev/stdin "${pkgdir}/usr/lib/systemd/system/sp12-flex-bt-connect.service"

@@ -30,7 +30,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works** (`0006`, stock nxp-nci core): phones, and contactless cards when polling includes a listen phase (initiator + NFC-DEP target, as Windows does). Reader-only polling misses cards (8b). Daemon + Omarchy plugin: 8b2 | stock nxp-nci + `0006`, tools 1.21 |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
-| 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency); keyboard wake and longer suspends still untested | |
+| 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency). Keyboard wake works attached and over Bluetooth (Phase 4, `0025`/`0026`, bluez-sp12) | |
 | 9 | Speakers | `rt1320` | **Fine, not reproduced** (2026-09-24): loud and clean at 100% and at low steps with bass-heavy tracks. #2144 had reported distortion at high volume and low loudness at low volume | |
 | 10 | Slim Pen tail button | BLE | **Works** (`sp12-pen-pair`): Meta+F20 / F19 / F18 for click / double click / hold | bluez |
 | 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | Temperatures **work** via `surface_temp` (hwmon `surface_thermal`: RTS1–6, VTS1–4); the ACPI devices themselves stay unbound | Windows PEP/thermal framework |
@@ -828,7 +828,7 @@ embedded controller (`surface_battery` under `MSHW0743`), whose power_supply has
    `surface_battery` in our DKMS modules, so standard tools (e.g. TLP, a
    `power_supply` udev rule) can set it.
 
-#### 8d: OLED PSR2 without the pulse
+#### 8d: OLED PSR2 without the pulse: closed
 With xe's default PSR2 (selective update, selective fetch), the OLED pulses faintly on a
 mostly still screen, and Windows doesn't. A live A/B via debugfs `i915_edp_psr_debug`
 (1 = off, 3 = force PSR1) removed it.
@@ -848,12 +848,41 @@ mostly still screen, and Windows doesn't. A live A/B via debugfs `i915_edp_psr_d
   HDR AUX interface in nits (0x344 = 0x90); the TCON has an optimization capability
   that isn't enabled.
 
-To do:
-- Find out whether Windows runs PSR2 on this panel and with what parameters.
-- Tune PSR2 (wake lines, SU granularity, early transport, IO/fast wake) with drm
-  debug on.
-- Report it to the xe/PTL display maintainers if there's a panel quirk to add. The
-  gain is the extra idle power of PSR2 over PSR1.
+**Closed (2026-11-04):** weeks of daily use on the default PSR2 brought no further pulse,
+so the first sightings were a fluke. The machine stays on PSR2 (tools 1.22's commented-out
+`options` line). If it comes back: uncomment the line for PSR1, and compare Windows' PSR2
+parameters and the wake-line/SU tuning noted above.
+
+#### 8e: Flex Keyboard updates from the SP11 (tools 1.26, 2026-11-04)
+The SP11's `surface-pro-11-support` package (omarchy-pkgs, 1-3) moved on after the
+autopair port in tools 1.25. Carried over:
+- **`sp12-flex-pair`:** clears a bonding left pending by an interrupted run
+  (`btmgmt cancelpair`, else Busy 0x0a), gives up a pair after 45 s with the
+  wedged-LE-connect explanation and the controller reset to try, keeps Pairable on
+  only for the pairing (try/finally), lists other connected devices for context,
+  and reads the host address fresh before storing the connection interval.
+  `SP12_FLEX_ADDRESS_FILE` overrides the address file.
+- **`sp12-touchpad-mode` sleep hook:** after resume, a `systemd-run` job reads the
+  attached touchpad's (SAM `0019:045E:0C8D`) Input Mode (feature 0x84) and
+  surface/button switches (0x85), and restores mode 3 with both switches on, as
+  hid-multitouch does at attach. On the SP11 the touchpad came back in mouse mode
+  after about 1 in 60 resumes; not yet seen here, but the keyboard and endpoint are
+  the same. Only the SAM interface: BlueZ cuts the Bluetooth GET_FEATURE reply to
+  the report ID byte, so a mode read there is meaningless.
+- **Tests:** `pkg/sp12-flex-tools/test.sh` (stubbed bluetoothctl/btmgmt/hidraw, run
+  by the PKGBUILD's `check()`): autopair, reconnect-on-detach, the touchpad hook.
+
+Not carried:
+- **Privacy waits** in autopair/reconnect: they wait out `surface-pro-11-pen-pair`,
+  which turns LE privacy on while pairing (the pen click-reconnects only for a host
+  that sent it an identity key). `sp12-pen-pair` doesn't touch privacy. Port them
+  together with that pen pairing, which would also answer 8a's open "touch-to-pair
+  without Windows".
+- **Touchpad quirk:** the SP11 uses `AttrTPKComboLayout=below` for palm rejection over
+  Bluetooth; here the hwdb marks the touchpad internal (palm detection on) and the
+  quirk adds `ModelTabletModeNoSuspend`, which covers it.
+
+Hardware check pending: the Flex Keyboard was on the SP11 during the port.
 
 ### Post-work: upstream reports (once everything is up)
 - **#2144, POS event storm (`0008`):** everyone running the SP12 registry entry has
