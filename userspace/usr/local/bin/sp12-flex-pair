@@ -13,7 +13,7 @@ Both ship in the sp12-modules DKMS package (dkms/ in this project).
 Ported from turbineBMW/surface-pro-11-linux (sp11-flex-pair).
 
     sudo sp12-flex-pair              # pair, prompting to detach
-    sudo sp12-flex-pair --status     # read the channel, change nothing
+    sudo sp12-flex-pair --status     # query the keyboard, pair nothing
     sudo sp12-flex-pair --no-detach  # pair while attached (auto-pair)
     sudo sp12-flex-pair --conn-params  # only store the fast link settings
 
@@ -155,7 +155,8 @@ def connected_le_devices():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--status", action="store_true", help="read only, change nothing")
+    ap.add_argument("--status", action="store_true",
+                    help="query the keyboard and pair nothing (re-sends the host address, which prompts its device report)")
     ap.add_argument("--conn-params", action="store_true",
                     help="only store the fast connection interval for the paired keyboard")
     ap.add_argument("--no-detach", action="store_true",
