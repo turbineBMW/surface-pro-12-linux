@@ -400,6 +400,25 @@ still lists the soft-ISP front camera too; relay CPU (~0.7 core while
 streaming, HAL 3A included) to be measured properly; rear camera (stage 5);
 DKMS 1.16 build so the PSYS module and loopback survive reboots.
 
+**Stage 5 done (2026-11-05): rear camera.** `0029` adds the 4076×2806 mode
+(Windows' window: 4128×2848 from (64,160), ISP offsets 26/21, timing and PLL
+of 4224×3136). First PSYS capture clean at 1080p30. The module is mounted
+upside down; Windows sets both flips in `0x3820`, this driver has them as
+controls. A udev rule setting them once was reset by a libcamera probe, so
+the HAL now does it at every stream start: `isp/patches/
+hal-sensor-orientation.patch` feeds a `sensorOrientation` profile key into
+the HAL's existing 180° path (HFLIP/VFLIP on the sensor); icamerasrc's
+`flip-mode` changes nothing. With both flips the picture is the scene
+rotated 180° and the colour is unchanged, so the Windows graph was made for
+that readout. Second loopback device and relay instance, "Surface Rear
+Camera ISP"; both ISP cameras are PipeWire sources next to the soft-ISP
+ones. Build note: `make M=dir` reads the tree's cached `kernel.release` /
+`utsrelease.h`; a module built after a commit beyond the release tag gets a
+"+" in its vermagic unless those are regenerated with `LOCALVERSION=`
+(`make LOCALVERSION= include/generated/utsrelease.h`). DKMS 1.16 +
+tools 1.29 are installed; the 7.4 kernel has a `build` link to its tree,
+so DKMS (ours and v4l2loopback) builds for it. `0029` goes into DKMS 1.17.
+
 ## 6. Risks and unknowns
 
 - The `ifd` words and BBPS flag bits Glauser copied "by comparison rather than
