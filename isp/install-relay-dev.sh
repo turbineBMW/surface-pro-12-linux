@@ -30,7 +30,7 @@ if lsmod | grep -q '^v4l2loopback' && ! grep -qx "Surface Rear Camera ISP" /sys/
 fi
 if ! lsmod | grep -q '^v4l2loopback'; then
 	if modprobe v4l2loopback 2>/dev/null; then :; else
-		insmod "$KO" devices=2 exclusive_caps=1,1 card_label="Surface Front Camera ISP","Surface Rear Camera ISP"
+		insmod "$KO" devices=2 exclusive_caps=1,1 card_label="Surface Front Camera ISP,Surface Rear Camera ISP"
 	fi
 fi
 sleep 1
