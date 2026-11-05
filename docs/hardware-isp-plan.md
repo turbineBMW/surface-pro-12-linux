@@ -367,6 +367,34 @@ the HAL's buffers are all page-aligned.
   units (MHz = 0), psys config ABI layout, buffer sizes the HAL maps (10 ×
   3113472 / 196352 / 130560, flags 0x1c).
 
+**Stage 4 (2026-11-05), first A/B:** same scene, 60 frames each. PSYS: flat
+areas at level 174 with temporal noise 3.8 and spatial 3.5 (SNR ≈ 33 dB);
+soft ISP: level 115, temporal 3.7, spatial 3.9 (≈ 30 dB), and the PSYS
+picture is brighter, sharper and wider (full-width FOV versus the soft
+ISP's centre crop). `private/camera/psys/work/ab-metrics.py`. Low light and
+the LAIQ record question remain; the AIC logs nothing about records.
+
+**Stage 6 (2026-11-05), dev relay works:** `userspace/etc/{v4l2-relayd.d,
+systemd,modprobe.d}` + `isp/install-relay-dev.sh`. "Surface Front Camera
+ISP" (v4l2loopback) is fed by v4l2-relayd → icamerasrc → HAL → PSYS only
+while a client streams; 90 frames captured from the loopback, 3A converged,
+PSYS and ISYS suspended again afterwards. `v4l2loopback` for the hand-built
+7.4 kernel is a scratch build (`make -C ~/Projects/linux-7.4 M=<copy of
+/usr/src/v4l2loopback-0.15.4>`), loaded by the installer for the session.
+Lessons for the package: the relay unit greps the loopback name as an
+extended regex (no parentheses in the label); a GStreamer description must
+end in an element, not caps ("link has no sink"); the base unit has
+`InaccessibleDirectories=/home` and `CapabilityBoundingSet=` (root with no
+capabilities cannot traverse a 0700 home), so a prefix under /home needs
+`InaccessiblePaths=` reset plus `CAP_DAC_READ_SEARCH`; the HAL's SysV
+shared-memory segment (key 0x0043414d, mode 640, owner = first creator) locks
+other users out, so the relay needs `CAP_IPC_OWNER`, and a HAL killed with
+SIGKILL leaks the segment (`ipcrm`); GStreamer caches a failed plugin load in
+its registry, so the unit keeps its own under its private /tmp. Open: WirePlumber
+still lists the soft-ISP front camera too; relay CPU (~0.7 core while
+streaming, HAL 3A included) to be measured properly; rear camera (stage 5);
+DKMS 1.16 build so the PSYS module and loopback survive reboots.
+
 ## 6. Risks and unknowns
 
 - The `ifd` words and BBPS flag bits Glauser copied "by comparison rather than
