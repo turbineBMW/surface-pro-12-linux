@@ -1,13 +1,14 @@
 post_install() {
 	cat <<'EOF'
 sp12-camera-hal: the cameras through the IPU7 hardware ISP appear as
-"Surface Front Camera ISP" and "Surface Rear Camera ISP" (v4l2loopback,
-fed on demand by v4l2-relayd). To start them now:
+"Surface Front Camera (ISP)" and "Surface Rear Camera (ISP)" (v4l2loopback,
+fed on demand by v4l2-relayd). The relay instances are started by udev when
+/dev/ipu7-psys0 appears (sp12-flex-tools 1.32+), so nothing is enabled; on a
+kernel without the PSYS driver (sp12-modules-dkms 1.17+, kernel 7.4+) they
+stay off. To start now without rebooting:
   modprobe -r v4l2loopback; modprobe v4l2loopback
-  systemctl enable --now v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service
+  udevadm trigger --subsystem-match=psys
 then, in the desktop session: systemctl --user restart wireplumber
-They start at boot once enabled. The kernel side is sp12-modules-dkms
-(intel-ipu7-psys, 1.17 or later) with firmware intel/ipu/ipu7ptl_fw.bin.
 EOF
 }
 

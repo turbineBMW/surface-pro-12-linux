@@ -416,6 +416,19 @@ default. DKMS 1.17 carries 0029. Installed 2026-11-05 via
 `isp/install-hal-package.sh` (removes the dev copies under /etc first):
 both relays stream from /usr with /home inaccessible, no HAL errors.
 
+**Reboot test (2026-11-05).** A routine reboot lands on limine's default,
+Omarchy 7.2 (no PSYS driver; `sp12test` 7.4 is a manual pick). There the
+relays still started: icamerasrc registered no cameras (the old ISYS
+driver's entity names), the pipeline failed (`GST_IS_ELEMENT` assertion),
+the units stayed active and anything opening an ISP node hung after one
+frame. Fix (tools 1.32, HAL pkgrel 2): the relays are wanted by
+`/dev/ipu7-psys0` through the PSYS udev rule (`SYSTEMD_WANTS`) instead of
+being enabled, with `ConditionPathExists=/dev/ipu7-psys0` in the drop-in as
+a guard. Verified on 7.2: relays inactive, the writer-less loopback devices
+are not offered, PipeWire lists only the soft-ISP cameras. The positive case
+(device appears → relays start → ISP cameras listed, nothing manual) is
+checked on the next 7.4 boot.
+
 **Stage 5 done (2026-11-05): rear camera.** `0029` adds the 4076×2806 mode
 (Windows' window: 4128×2848 from (64,160), ISP offsets 26/21, timing and PLL
 of 4224×3136). First PSYS capture clean at 1080p30. The module is mounted

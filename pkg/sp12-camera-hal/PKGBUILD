@@ -11,7 +11,7 @@
 pkgname=sp12-camera-hal
 # The HAL release (ipu7-camera-hal e5172cc, 2025-12-10).
 pkgver=2025.12.10
-pkgrel=1
+pkgrel=2
 pkgdesc="Intel IPU7 camera HAL and icamerasrc with the Surface Pro 12 configuration (hardware ISP)"
 arch=(x86_64)
 url="https://github.com/intel/ipu7-camera-hal"

@@ -1,4 +1,8 @@
 # Surface Pro 12 (Intel): the IPU7 PSYS (hardware ISP) node is root-only by
 # default. Give it to the video group and to the seated user (uaccess ACL),
-# as the other camera nodes are.
-KERNEL=="ipu7-psys[0-9]*", GROUP="video", MODE="0660", TAG+="uaccess"
+# as the other camera nodes are. The hardware-ISP relays (sp12-camera-hal)
+# are started by this device appearing rather than enabled statically: on a
+# kernel without the PSYS driver they stay off, and their loopback devices,
+# having no writer, are not offered as cameras.
+KERNEL=="ipu7-psys[0-9]*", GROUP="video", MODE="0660", TAG+="uaccess", TAG+="systemd", \
+  ENV{SYSTEMD_WANTS}+="v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service"
