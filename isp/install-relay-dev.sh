@@ -18,6 +18,8 @@ for cam in front rear; do
 		"/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf"
 done
 rm -f /etc/udev/rules.d/70-sp12-rear-flip.rules
+install -Dm644 "$R/userspace/usr/share/wireplumber/wireplumber.conf.d/50-sp12-isp-cameras.conf" \
+	/etc/wireplumber/wireplumber.conf.d/50-sp12-isp-cameras.conf
 
 # (Re)load the loopback module so the card label matches the config.
 if lsmod | grep -q '^v4l2loopback' && ! grep -qx "Surface Rear Camera ISP" /sys/devices/virtual/video4linux/*/name 2>/dev/null; then
