@@ -18,11 +18,15 @@ done
 rm -f /etc/modprobe.d/sp12-v4l2loopback.conf /etc/wireplumber/wireplumber.conf.d/50-sp12-isp-cameras.conf
 
 pacman -U --noconfirm \
-	"$R"/pkg/sp12-camera-hal/sp12-camera-hal-2025.12.10-1-x86_64.pkg.tar.zst \
-	"$R"/pkg/sp12-flex-tools/sp12-flex-tools-1.31-1-any.pkg.tar.zst
+	"$R"/pkg/sp12-camera-hal/sp12-camera-hal-2025.12.10-2-x86_64.pkg.tar.zst \
+	"$R"/pkg/sp12-flex-tools/sp12-flex-tools-1.32-1-any.pkg.tar.zst
 
 systemctl daemon-reload
-systemctl enable --now v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service
+# The relays are wanted by the PSYS device (udev), not enabled.
+systemctl disable v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service 2>/dev/null || true
+udevadm control --reload
+udevadm trigger --subsystem-match=psys
 sleep 2
+echo "psys device: $(ls /dev/ipu7-psys0 2>/dev/null || echo none)"
 systemctl --no-pager --lines=0 status v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service | grep -E "service -|Active|Drop-In|sp12-isp|zz-dev" || true
 echo "Now run: systemctl --user restart wireplumber"
