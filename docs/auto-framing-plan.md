@@ -139,7 +139,9 @@ Each stage ends in a go/no-go. Stages 1–2 need the user in front of the camera
   login by a user unit; package `sp12-autoframe` 0.1 (plugin, model from
   OpenCV Zoo at a pinned commit, relay environment file + unit drop-in,
   tmpfiles) installed in place of the dev install.
-- Omarchy tray/plugin item ("Framing: auto / off").
+- Done 2026-11-05: Omarchy bar widget `sp12.autoframe` (toggle, presets,
+  every setting as a slider, boxes overlay, reset), package 0.2 with a
+  `sp12-camera-hal>=2025.12.10-3` constraint.
 - `off` is the full field of view scaled from 4K, not bit-identical to the
   former 1080p relay output (the ISP scales 3844→3840 differently); fine.
 - GL crop/scale through DMABuf if the CPU path shows in power numbers.

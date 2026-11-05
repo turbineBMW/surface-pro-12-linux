@@ -10,6 +10,8 @@ sp12-autoframe: the "Surface Front Camera (ISP)" now follows your face.
   sp12-autoframe --face 0.40       tighter (0.30 default, 0.22 loose)
   sp12-autoframe status            mode and settings in force
 Settings are saved per user and restored at login (sp12-autoframe.service).
+Omarchy bar widget (toggle + sliders), as the desktop user:
+  sp12-autoframe plugin install
 EOF
 }
 
