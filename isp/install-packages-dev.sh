@@ -17,8 +17,8 @@ if [ ! -e /lib/modules/$KVER/build ] || [ -L /lib/modules/$KVER/build ]; then
 fi
 
 pacman -U --noconfirm \
-	"$R"/pkg/sp12-modules-dkms/sp12-modules-dkms-1.16-1-any.pkg.tar.zst \
-	"$R"/pkg/sp12-flex-tools/sp12-flex-tools-1.29-1-any.pkg.tar.zst
+	"$R"/pkg/sp12-modules-dkms/sp12-modules-dkms-1.17-1-any.pkg.tar.zst \
+	"$R"/pkg/sp12-flex-tools/sp12-flex-tools-1.30-1-any.pkg.tar.zst
 
 # Everything registered with DKMS, for the running kernel (v4l2loopback too).
 dkms autoinstall -k "$KVER" || true
