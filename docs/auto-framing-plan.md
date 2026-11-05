@@ -248,3 +248,47 @@ Decision: package 0.4 defaults the relay to **crop mode** (4K, CPU crop,
   part of the private `sp12-camera-hal` inputs like the rest.
 - **Surface Pro 11**: same idea, different pipeline (CAMSS/libcamera); the
   element and controller are reusable, the source and crop stage are not.
+
+## 7. Next steps (found 2026-11-05 evening, during the power work)
+
+The power-saver branch (PR #14) changed the relays' `cameraDebug` from 0x1
+to 0x60. 0x1 was LV1 debug that *replaces* the HAL's default mask, so until
+then the relays logged every thread wait and **no errors or warnings**. With
+errors visible, the installed stack (sp12-autoframe 0.4, crop mode; HAL
+pkgrel 5) shows the following. None of it is fixed yet.
+
+1. **Check that the front camera still delivers frames.** Test clients got
+   none within the time limit: `v4l2-ctl --stream-mmap --stream-count=30`
+   (25 s), `gst-launch-1.0 v4l2src num-buffers=90 ! fakesink` (30 s) and
+   200 buffers (40 s). The HAL opened and closed the camera cleanly each
+   time. This was the same before and after the log-level change, so the
+   change is not the cause. It may be the test method (loopback format
+   negotiation), so first try a real client (browser through PipeWire,
+   `qv4l2`). If that fails too, compare against the plain 1080p relay
+   (`sp12-front.conf` without the autoframe file).
+2. **Per-frame sensor control errors on the IMX681** (`/dev/v4l-subdev5`,
+   `imx681 1-0010`), each about once per frame:
+   - `SetControl ... error: Invalid argument` (twice per frame)
+   - `SetControl ... error: Permission denied` (once per frame)
+   - `SensorHwCtrl: failed to set fll`
+   - `SensorHwCtrl: failed to set digitalGain`
+   - `CameraDevice: handleEvent, set test Pattern Mode failed`
+
+   The subdev exposes only `exposure` (4–3173) and `analogue_gain` (0–960).
+   There is no `vblank` (the HAL's fll), digital gain or test-pattern
+   control. Either add them to the imx681 driver (DKMS patch 0010 series) or
+   stop the HAL's sensor profile from asking for them. The EPERM is still
+   unidentified: find which control ID it is, likely a read-only one.
+3. **Hypothesis: AE without fll might add to the dim-room noise.** In a dim
+   room exposure sat at 3139/3173 and analogue gain at 954/960. Without a
+   writable `vblank`, the HAL cannot lengthen the frame for more exposure,
+   so AE may lean on gain instead. Worth checking alongside the TNR finding
+   in section 5 once `vblank` is writable.
+4. **Relay CPU while streaming.** In this test the front relay used about
+   34 s of CPU in about 28 s (≈1.2 cores). Earlier measurements were 25 %
+   of a core for crop mode and 17 % for ISP mode. Re-measure once item 1 is
+   settled; part of it may have been the per-frame error logging above.
+
+At idle the relays cost nothing measurable (no context switches in 15
+minutes, before or after serving a client), so on-demand starting is not
+needed for power.
