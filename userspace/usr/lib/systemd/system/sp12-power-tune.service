@@ -1,0 +1,16 @@
+[Unit]
+Description=Surface Pro 12 power-saver extras (Wi-Fi power save, PCIe ASPM, runtime PM)
+Documentation=file:///usr/bin/sp12-power-tune
+# Starts and stops with power-profiles-daemon (the package links it into
+# power-profiles-daemon.service.wants). To turn it off: systemctl mask.
+After=power-profiles-daemon.service
+PartOf=power-profiles-daemon.service
+
+[Service]
+ExecStart=/usr/bin/sp12-power-tune --watch
+ExecStopPost=/usr/bin/sp12-power-tune --restore
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=power-profiles-daemon.service

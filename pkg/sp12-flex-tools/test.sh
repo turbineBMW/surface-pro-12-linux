@@ -269,4 +269,66 @@ rm -rf "$touchpad/hidraw/hidraw4"
 grep -q 'usr/lib/systemd/system-sleep/sp12-touchpad-mode' "$root/pkg/sp12-flex-tools/PKGBUILD" ||
   fail "the touchpad hook is installed where systemd-sleep runs hooks"
 
-echo "ok - sp12-flex-tools Flex Keyboard and touchpad checks"
+# Power-saver extras: follow the profile, put back exactly what was there.
+pt="$scratch/power-tune"
+mkdir -p "$pt/bin" "$pt/sys/module/pcie_aspm/parameters" \
+  "$pt/sys/bus/pci/devices/0000:00:02.0/power" "$pt/sys/bus/pci/devices/0000:00:14.3/power"
+cat >"$pt/bin/busctl" <<'STUB'
+#!/bin/bash
+echo "s \"$(<"$PT/profile")\""
+STUB
+cat >"$pt/bin/iw" <<'STUB'
+#!/bin/bash
+case "$*" in
+  dev) printf 'phy#0\n\tInterface wlan0\n\t\ttype managed\n' ;;
+  "dev wlan0 set power_save "*) echo "$5" >"$PT/wifi" ;;
+  "dev wlan0 get power_save") echo "Power save: $(<"$PT/wifi")" ;;
+esac
+STUB
+chmod +x "$pt/bin/"*
+pt_reset() {
+  echo '[default] performance powersave powersupersave' >"$pt/sys/module/pcie_aspm/parameters/policy"
+  echo auto >"$pt/sys/bus/pci/devices/0000:00:02.0/power/control"
+  echo on >"$pt/sys/bus/pci/devices/0000:00:14.3/power/control"
+  echo off >"$pt/wifi"
+  rm -rf "$pt/run" "$pt/conf"
+}
+pt_run() {
+  echo "$1" >"$pt/profile"; shift
+  PATH="$pt/bin:$PATH" PT="$pt" SP12_POWER_TUNE_SYS="$pt/sys" SP12_POWER_TUNE_RUN="$pt/run" \
+    SP12_POWER_TUNE_CONF="$pt/conf" bash "$u/usr/local/bin/sp12-power-tune" "$@" 2>/dev/null
+}
+pt_state() {
+  echo "$(<"$pt/sys/module/pcie_aspm/parameters/policy") $(<"$pt/sys/bus/pci/devices/0000:00:02.0/power/control")" \
+    "$(<"$pt/sys/bus/pci/devices/0000:00:14.3/power/control") wifi=$(<"$pt/wifi")"
+}
+stock='[default] performance powersave powersupersave auto on wifi=off'
+
+pt_reset; pt_run balanced --apply
+[[ $(pt_state) == "$stock" && ! -e $pt/run/applied ]] || fail "balanced leaves everything alone"
+pt_run power-saver --apply
+[[ $(pt_state) == "powersupersave auto auto wifi=on" ]] ||
+  fail "power-saver turns on ASPM powersupersave, runtime PM everywhere and Wi-Fi power save"
+pt_run power-saver --apply
+pt_run performance --apply
+[[ $(pt_state) == "default auto on wifi=off" ]] ||
+  fail "leaving power-saver restores the boot settings, not the ones it applied (even after a second apply)"
+[[ $(pt_run power-saver) == "Profile: power-saver"$'\n'"Power-saver extras: not applied"* ]] ||
+  fail "the status shows the profile and whether the extras are on"
+
+pt_reset; echo wifi=0 >"$pt/conf"; pt_run power-saver --apply
+[[ $(pt_state) == "powersupersave auto auto wifi=off" ]] || fail "wifi=0 leaves Wi-Fi power save alone"
+pt_reset; echo pcie=0 >"$pt/conf"; pt_run power-saver --apply
+[[ $(pt_state) == "${stock% wifi=off} wifi=on" ]] || fail "pcie=0 leaves ASPM and runtime PM alone"
+
+pt_reset; pt_run power-saver --apply; pt_run power-saver --restore
+[[ $(pt_state) == "default auto on wifi=off" && ! -e $pt/run/applied ]] ||
+  fail "--restore undoes the extras even in power-saver (service stop)"
+
+for f in "usr/bin/sp12-power-tune" "usr/lib/systemd/system/sp12-power-tune.service" \
+  "usr/lib/systemd/system/power-profiles-daemon.service.wants/sp12-power-tune.service" \
+  "usr/lib/NetworkManager/dispatcher.d/90-sp12-power-tune" "usr/lib/systemd/system-sleep/sp12-power-tune"; do
+  grep -q "$f" "$root/pkg/sp12-flex-tools/PKGBUILD" || fail "the package installs $f"
+done
+
+echo "ok - sp12-flex-tools Flex Keyboard, touchpad and power-tune checks"

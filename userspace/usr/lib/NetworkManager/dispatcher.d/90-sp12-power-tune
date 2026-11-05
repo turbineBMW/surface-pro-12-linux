@@ -1,0 +1,5 @@
+#!/bin/sh
+# NetworkManager sets Wi-Fi power save from its own config on every
+# connection (Omarchy: off). In power-saver, turn it back on.
+[ "$2" = up ] || exit 0
+exec /usr/bin/sp12-power-tune --apply
