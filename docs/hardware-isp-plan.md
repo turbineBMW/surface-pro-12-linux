@@ -395,10 +395,26 @@ capabilities cannot traverse a 0700 home), so a prefix under /home needs
 shared-memory segment (key 0x0043414d, mode 640, owner = first creator) locks
 other users out, so the relay needs `CAP_IPC_OWNER`, and a HAL killed with
 SIGKILL leaks the segment (`ipcrm`); GStreamer caches a failed plugin load in
-its registry, so the unit keeps its own under its private /tmp. Open: WirePlumber
-still lists the soft-ISP front camera too; relay CPU (~0.7 core while
-streaming, HAL 3A included) to be measured properly; rear camera (stage 5);
-DKMS 1.16 build so the PSYS module and loopback survive reboots.
+its registry, so the unit keeps its own under its private /tmp. Relay CPU (~0.7 core
+while streaming, HAL 3A included) still to be measured properly.
+
+**Stage 6 done (2026-11-05): packaged.** `pkg/sp12-camera-hal` (built by
+`isp/build-package.sh`, which stages the pristine checkouts, our HAL patches,
+profiles, graphs and tuning into a gitignored `private/`): the HAL configured
+for `/usr` (plugin path is compiled in) and staged with `DESTDIR` so
+icamerasrc builds against it; config at the compiled-in
+`/usr/share/defaults/etc/camera/ipu75xa/` with only our two sensors; Intel's
+bins with their licence (binary redistribution allowed); the relay confs,
+drop-ins and modprobe options. The packaged drop-in keeps only
+`CAP_IPC_OWNER`, `ExecStopPost=ipcrm -M 0x0043414d` and the private
+GStreamer registry; the dev-prefix overrides live in
+`isp/relay-dev-prefix.conf`, added by the dev installer only. The package is
+not published (Windows-derived graphs and tuning). `sp12-flex-tools` 1.31
+ships a WirePlumber rule ranking the ISP nodes (1000/900) above the soft-ISP
+ones (800/750) with "(ISP)" descriptions, so the ISP front camera is the
+default. DKMS 1.17 carries 0029. Installed 2026-11-05 via
+`isp/install-hal-package.sh` (removes the dev copies under /etc first):
+both relays stream from /usr with /home inaccessible, no HAL errors.
 
 **Stage 5 done (2026-11-05): rear camera.** `0029` adds the 4076×2806 mode
 (Windows' window: 4128×2848 from (64,160), ISP offsets 26/21, timing and PLL

@@ -40,6 +40,16 @@ templates, with the `Intel IPU7.5` entity names the ipu6 driver uses).
 - `hal-aic-timestamp.patch`: set the mandatory AIC input timestamp (Glauser).
 - `hal-arch-jsoncpp.patch`: Arch's `<json/json.h>` include path (AUR).
 
+## build-package.sh, install-hal-package.sh
+
+The real thing: `build-package.sh` stages the inputs makepkg cannot fetch
+(the pinned checkouts, `patches/`, `config/sensors/`, the converted graphs,
+the Windows tuning files, the relay configuration) into
+`pkg/sp12-camera-hal/private/` (gitignored) and runs makepkg;
+`install-hal-package.sh` (root) installs the result together with
+`sp12-flex-tools`, removing the copies the dev installer left under /etc.
+The package stays local because of the Windows-derived files.
+
 ## build-dev.sh, run-dev.sh
 
 Dev build of HAL + icamerasrc + closed libraries into
