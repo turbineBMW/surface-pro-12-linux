@@ -12,18 +12,25 @@ P=$R/private/camera/psys/work/prefix
 KO=${1:-/tmp/claude-1000/-home-turbinebmw-Projects-surface-pro-12-linux/65d22590-a669-4df9-947e-69a7fee5b632/scratchpad/v4l2loopback/v4l2loopback.ko}
 
 install -Dm644 "$R/userspace/etc/modprobe.d/sp12-v4l2loopback.conf" /etc/modprobe.d/sp12-v4l2loopback.conf
-install -Dm644 "$R/userspace/etc/v4l2-relayd.d/sp12-front.conf" /etc/v4l2-relayd.d/sp12-front.conf
-install -Dm644 "$R/userspace/etc/systemd/system/v4l2-relayd@sp12-front.service.d/sp12-isp.conf" \
-	"/etc/systemd/system/v4l2-relayd@sp12-front.service.d/sp12-isp.conf"
+for cam in front rear; do
+	install -Dm644 "$R/userspace/etc/v4l2-relayd.d/sp12-$cam.conf" /etc/v4l2-relayd.d/sp12-$cam.conf
+	install -Dm644 "$R/userspace/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf" \
+		"/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf"
+done
+install -Dm644 "$R/userspace/usr/lib/udev/rules.d/70-sp12-rear-flip.rules" /etc/udev/rules.d/70-sp12-rear-flip.rules
+udevadm control --reload
+for sd in /sys/class/video4linux/v4l-subdev*; do
+	grep -q "^ov13858 " $sd/name 2>/dev/null && v4l2-ctl -d /dev/$(basename $sd) --set-ctrl horizontal_flip=1,vertical_flip=1
+done
 
 # (Re)load the loopback module so the card label matches the config.
-if lsmod | grep -q '^v4l2loopback' && ! grep -qx "Surface Front Camera ISP" /sys/devices/virtual/video4linux/*/name 2>/dev/null; then
+if lsmod | grep -q '^v4l2loopback' && ! grep -qx "Surface Rear Camera ISP" /sys/devices/virtual/video4linux/*/name 2>/dev/null; then
 	systemctl stop v4l2-relayd.service 2>/dev/null || true
 	rmmod v4l2loopback
 fi
 if ! lsmod | grep -q '^v4l2loopback'; then
 	if modprobe v4l2loopback 2>/dev/null; then :; else
-		insmod "$KO" devices=1 exclusive_caps=1 card_label="Surface Front Camera ISP"
+		insmod "$KO" devices=2 exclusive_caps=1,1 card_label="Surface Front Camera ISP","Surface Rear Camera ISP"
 	fi
 fi
 sleep 1
@@ -31,6 +38,9 @@ grep -H . /sys/devices/virtual/video4linux/*/name
 
 systemctl daemon-reload
 systemctl enable --now v4l2-relayd.service
-systemctl restart v4l2-relayd@sp12-front.service
+systemctl restart v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service
 sleep 2
-systemctl --no-pager --lines=3 status v4l2-relayd@sp12-front.service || true
+systemctl --no-pager --lines=0 status v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service | grep -E "service -|Active" || true
+# WirePlumber probes a loopback device when it appears; with exclusive_caps it
+# only advertises capture once the relay is attached, so re-enumerate now.
+echo "Now run: systemctl --user restart wireplumber"

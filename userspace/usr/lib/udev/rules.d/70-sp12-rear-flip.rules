@@ -1,0 +1,7 @@
+# Surface Pro 12 (Intel): the rear camera (OV13858) is mounted upside down.
+# Set its flips once when the sensor appears: libcamera sets the same two
+# controls for its 180-degree rotation, and Intel's HAL (hardware ISP path)
+# leaves them alone, so both get a correctly oriented picture. The Windows
+# graph settings were generated for this flipped readout.
+SUBSYSTEM=="video4linux", KERNEL=="v4l-subdev*", ATTR{name}=="ov13858 *", \
+  RUN+="/usr/bin/v4l2-ctl -d /dev/%k --set-ctrl horizontal_flip=1,vertical_flip=1"
