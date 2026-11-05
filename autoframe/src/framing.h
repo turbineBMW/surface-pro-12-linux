@@ -33,6 +33,10 @@ struct FrameParams {
     bool group = true;
     int group_grow_frames = 30;
     float match_iou = 0.3f;
+    // > 0: the consumer extends every window to this aspect (w/h) around its
+    // centre before cropping (the ISP path), so the centre has to keep that
+    // taller/wider rectangle inside the source too.
+    float extend_aspect = 0.f;
 };
 
 inline float iou(float ax, float ay, float aw, float ah, float bx, float by, float bw, float bh) {
@@ -163,8 +167,13 @@ private:
     void limit(float& lcx, float& lcy, float& lw) const {
         lw = std::min(std::max(lw, min_w), full_w);
         float lh = lw / aspect;
-        lcx = std::min(std::max(lcx, lw / 2), sw - lw / 2);
-        lcy = std::min(std::max(lcy, lh / 2), sh - lh / 2);
+        float ew = lw, eh = lh;
+        if (p.extend_aspect > 0) {
+            if (lw / lh > p.extend_aspect) eh = lw / p.extend_aspect; else ew = lh * p.extend_aspect;
+        }
+        ew = std::min(ew, (float)sw); eh = std::min(eh, (float)sh);
+        lcx = std::min(std::max(lcx, ew / 2), sw - ew / 2);
+        lcy = std::min(std::max(lcy, eh / 2), sh - eh / 2);
     }
 };
 

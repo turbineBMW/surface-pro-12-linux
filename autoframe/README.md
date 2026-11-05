@@ -7,8 +7,18 @@ output that follows them, scaled to 1080p. Plan and findings:
 `docs/auto-framing-plan.md`.
 
 ```
-icamerasrc (IMX681, PSYS, NV12 3840x2160) ! sp12autoframe ! NV12 1920x1080 ! videoconvert  →  v4l2-relayd → loopback → PipeWire
+icamerasrc (IMX681, PSYS, NV12 1920x1080) ! sp12autoframe mode=isp ! videoconvert  →  v4l2-relayd → loopback → PipeWire
+        ▲ zoom-region "l,t,r,b" (active-array px) ──┘
 ```
+
+Two modes. `mode=isp` (the package default, needs sp12-camera-hal
+2025.12.10-4 or later): the element passes 1080p through, runs the detector
+on it, maps detections into sensor active-array coordinates through the
+window it sent `isp-latency` frames earlier, and sets `zoom-region` on the
+upstream icamerasrc; the ISP's output scaler crops and scales (the HAL's
+pan-tilt-zoom path, unblocked by `isp/patches/hal-zoom-region.patch`).
+`mode=crop`: 4K in, the element crops and scales on the CPU (the stage-1
+path, kept for hardware without the patched HAL).
 
 ## Layout
 
@@ -27,8 +37,13 @@ icamerasrc (IMX681, PSYS, NV12 3840x2160) ! sp12autoframe ! NV12 1920x1080 ! vid
 - `install-dev.sh` / `uninstall-dev.sh` (root): stage the plugin, the model
   and a HAL config copy with 4K output under `/opt/sp12-autoframe-dev`, add
   the relay drop-in (plugin path, config path, NPU device access), rewrite
-  the relay's source pipeline, restart the relay. For hacking on the element;
-  `install-package.sh` (root) replaces it with the package.
+  the relay's source pipeline (`AUTOFRAME_MODE=isp` for ISP mode), restart
+  the relay. For hacking on the element; `install-package.sh` (root)
+  replaces it with the package, `install-isp-dev.sh` installs a freshly built
+  HAL package plus the element in ISP mode.
+- `tools/zoom-region-test.py`: drives icamerasrc's `zoom-region` directly
+  (zoom, two-axis pan, corner, full view) and saves frames; run as root
+  against a dev prefix.
 - `../pkg/sp12-autoframe`: the package: the plugin in `/usr/lib/gstreamer-1.0`,
   the model in `/usr/share/sp12`, the toggle, a second relay environment file
   (`/etc/v4l2-relayd.d/sp12-front-autoframe.conf`, loaded after the relay's

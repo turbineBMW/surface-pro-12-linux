@@ -144,24 +144,67 @@ Each stage ends in a go/no-go. Stages 1–2 need the user in front of the camera
   `sp12-camera-hal>=2025.12.10-3` constraint.
 - `off` is the full field of view scaled from 4K, not bit-identical to the
   former 1080p relay output (the ISP scales 3844→3840 differently); fine.
-- GL crop/scale through DMABuf if the CPU path shows in power numbers.
+- GPU crop/scale: **tried and dropped 2026-11-05.** `vapostproc` (iHD VPP)
+  with `GstVideoCropMeta` works, but 4K system-memory frames have to be
+  copied into a VA surface and the 1080p result copied back for the loopback
+  device (which cannot import GPU buffers): 3.3 ms CPU per frame plus ~17 ms
+  of wall time against 1.8 ms for the CPU crop+scale (300 frames,
+  `videotestsrc` baseline subtracted). Only the ISP-side crop (stage 3)
+  removes the cost.
 - Detector cadence (every 2nd frame) and the 640×360 display pin as an
   alternative detector input if the downscale is the expensive part.
 - Go: survives suspend/resume and relay restarts; off/auto switch is seamless.
 
-### Stage 3 (optional): crop in the ISP, as Windows does
-- Linuxize graph **100003** the way `linuxize-100002` does 100002 (the GMV and
-  GDC nodes have their own input feeders; the tool currently leaves 100003
-  untouched), add `supportedVideoStabilizationModes: ["ON"]` to the profile,
-  run with `video-stabilization-mode=on`, verify the picture.
-- icamerasrc `zoom-region` property → `setZoomRegion`; find the coordinate
-  convention of `ia_dvs` `zoom_region` by experiment (the HAL's default is
-  `{0, 0, input_w/2, input_h/2}`, so it is not plain pixels of the input).
-- `sp12autoframe` in `mode=isp`: detector on the 1080p output, window sent
-  upstream, no crop in the element. Output is then cropped from the raw
-  3844×2640 frame by the GDC, with video stabilisation thrown in.
-- Go: zero CPU/GPU for the crop, no quality loss versus stage 1, the HAL's
-  per-frame zoom update keeps up at 30 fps.
+### Stage 3: crop in the ISP, as Windows does — in progress 2026-11-05
+
+Findings that replaced the original plan for this stage:
+
+- **Graph 100003 is out.** Its GDC (`SwGdc`, `gdc7_1`) is a *software* node
+  (`NodeTypes::Sw`) fed from the BBPS output pins; the Linux HAL has no
+  implementation for Sw nodes, so the stabilisation graph cannot run at all,
+  and even on Windows the warp is not done by the ISP. The `Dvs` code path
+  (`setZoomRegion` → `ia_dvs`) is therefore dead on Linux.
+- **The real path is PTZ inside graph 100002.** `camera_zoom_region_t`
+  (active-array pixels) → `PipeManager::updateZoomSettings` → normalised
+  pan/tilt/zoom, the region widened to the sensor aspect → `GraphConfig::
+  updateGraphSettingForPtz` → `GraphResolutionConfigurator::
+  updateStaticGraphConfig` → `updateRunKernelOfScalers`: the BBPS output
+  scaler/cropper run kernels get new crops → `IntelCca::
+  updateConfigurationResolutions` → the AIC recomputes the kernel payloads.
+  Per request. The "zoom key resolutions" in the graph file (1920×1080,
+  1280×720, 640×360) are the thresholds at which the kernel configuration
+  variant changes.
+- **Three gaps closed by `isp/patches/hal-zoom-region.patch`:**
+  1. `ParameterConvert::setParameters` never copied the zoom region into the
+     per-request `DataContext` (one line).
+  2. `updateZoomSettings` called a region "centred" when centred on *either*
+     axis (`||`), which turns a pan into a centred zoom; now both (`&&`).
+  3. `updateRunKernelOfScalers`: a window exactly the output size (a 2× zoom
+     of this sensor is a 1:1 1920-wide crop) took the pass-through branch,
+     whose final cropper always centred; it now crops at the ROI.
+- **`icamerasrc` `zoom-region` property** (`isp/patches/icamerasrc-zoom-region.patch`):
+  `"left,top,right,bottom"` in active-array pixels, applied while streaming
+  (`camera_set_parameters`); `0,0,0,0` is ignored by the HAL, the full view
+  is `0,0,3844,2640`.
+- **Verified on hardware** (`autoframe/tools/zoom-region-test.py`, dev HAL,
+  root because the HAL's SysV shared-memory segment belongs to the relay):
+  centred 2× zoom, two-axis pan, a corner window and the return to full view
+  all land where sent, at 1080p from the ISP, no 4K frame anywhere.
+- **Element `mode=isp`**: passes 1080p through, runs the detector on the
+  output, maps detections into active-array coordinates through the window
+  sent `isp-latency` frames earlier, keeps the window's sensor-aspect
+  extension inside the array (`extend_aspect` in the controller), and sets
+  `zoom-region` on the upstream icamerasrc only when the window moved ≥ 2 px.
+- Packaging: `sp12-camera-hal` pkgrel 4 carries both patches (the PKGBUILD
+  now applies `hal-*.patch` to the HAL and `icamerasrc-*.patch` to
+  icamerasrc); `autoframe/install-isp-dev.sh` installs it with the element in
+  ISP mode for the live test.
+
+Measured with the packaged stack (sp12-autoframe 0.3, HAL pkgrel 4), 300
+live frames: relay **17 %** of a core (crop mode was 25 %, the plain 1080p
+relay 13 %), detector 0.7 ms per frame on the NPU, crop 0 ms. Still to
+measure: the HAL's apply latency (`isp-latency`, default 2 frames) and the
+AIC recompute cost while the window moves.
 
 ## 6. Risks and open questions
 
