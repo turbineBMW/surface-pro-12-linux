@@ -11,7 +11,7 @@
 pkgname=sp12-camera-hal
 # The HAL release (ipu7-camera-hal e5172cc, 2025-12-10).
 pkgver=2025.12.10
-pkgrel=3
+pkgrel=4
 pkgdesc="Intel IPU7 camera HAL and icamerasrc with the Surface Pro 12 configuration (hardware ISP)"
 arch=(x86_64)
 url="https://github.com/intel/ipu7-camera-hal"
@@ -31,9 +31,14 @@ prepare() {
 	rm -rf hal bins icamerasrc
 	cp -a "$p/hal" "$p/bins" "$p/icamerasrc" .
 	cd hal
-	for patch in "$p"/patches/*.patch; do
+	for patch in "$p"/patches/hal-*.patch; do
 		patch -Np1 -s < "$patch"
 	done
+	cd ../icamerasrc
+	for patch in "$p"/patches/icamerasrc-*.patch; do
+		patch -Np1 -s < "$patch"
+	done
+	cd ..
 	# The closed libraries, found through pkg-config during the build.
 	sed "s#^prefix=.*#prefix=$srcdir/bins#" "$srcdir/bins/lib/pkgconfig/ia_imaging-ipu75xa.pc" \
 		> "$srcdir/ia_imaging-ipu75xa.pc"

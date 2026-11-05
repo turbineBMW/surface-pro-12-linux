@@ -1,0 +1,57 @@
+diff --git i/modules/ipu_desc/ipu75xa/GraphResolutionConfigurator.cpp w/modules/ipu_desc/ipu75xa/GraphResolutionConfigurator.cpp
+index 10b4598..eb6fa98 100644
+--- i/modules/ipu_desc/ipu75xa/GraphResolutionConfigurator.cpp
++++ w/modules/ipu_desc/ipu75xa/GraphResolutionConfigurator.cpp
+@@ -402,6 +402,21 @@ StaticGraphStatus GraphResolutionConfigurator::updateRunKernelOfScalers(bool fro
+             updateRunKernelPassThrough(upscalerRunKernel, inputWidth, inputHeight);
+             // Update ESPA crop if required
+             updateRunKernelFinalCropper(cropperRunKernel, inputWidth, inputHeight, outputWidth, outputHeight);
++            // The final cropper centred, which dropped the pan/tilt of a window
++            // exactly the output size (a 2x zoom on a 3844-wide sensor). Crop at
++            // the ROI instead, centred inside it where the ROI is larger.
++            {
++                int32_t left = static_cast<int32_t>(roi.cropLeft) - downscalerCropHistory.left +
++                               (static_cast<int32_t>(roi.width) - static_cast<int32_t>(outputWidth)) / 2;
++                int32_t top = static_cast<int32_t>(roi.cropTop) - downscalerCropHistory.top +
++                              (static_cast<int32_t>(roi.height) - static_cast<int32_t>(outputHeight)) / 2;
++                left = GRA_ROUND_DOWN(std::max(0, std::min(left, static_cast<int32_t>(inputWidth - outputWidth))), 2);
++                top = GRA_ROUND_DOWN(std::max(0, std::min(top, static_cast<int32_t>(inputHeight - outputHeight))), 2);
++                cropperRunKernel->resolution_info->input_crop.left = left;
++                cropperRunKernel->resolution_info->input_crop.right = inputWidth - outputWidth - left;
++                cropperRunKernel->resolution_info->input_crop.top = top;
++                cropperRunKernel->resolution_info->input_crop.bottom = inputHeight - outputHeight - top;
++            }
+         }
+         // If ROI is larger than scaler's output resolution - we downscale
+         else if (roi.width > outputWidth)
+diff --git i/src/core/processingUnit/PipeManager.cpp w/src/core/processingUnit/PipeManager.cpp
+index 5307f1f..f67da3a 100644
+--- i/src/core/processingUnit/PipeManager.cpp
++++ w/src/core/processingUnit/PipeManager.cpp
+@@ -539,7 +539,10 @@ bool PipeManager::updateZoomSettings(const camera_zoom_region_t& zoom, PtzInfo*
+         ptz->y = top;
+         ptz->xSize = xSize;
+         ptz->ySize = ySize;
+-        ptz->zoomCentered = (fabs(left + right - 1.0) < RATIO_TOL) ||
++        // A region is a centred zoom only when it is centred on both axes; a
++        // window centred on one axis and panned on the other is a real pan,
++        // and the centred path would drop the pan.
++        ptz->zoomCentered = (fabs(left + right - 1.0) < RATIO_TOL) &&
+                             (fabs(top + bottom - 1.0) < RATIO_TOL);
+         /*
+          * Only support same aspect ratio as active array crrently, extend region if need
+diff --git i/src/hal/ParameterConvert.cpp w/src/hal/ParameterConvert.cpp
+index 9ac0923..39e5bcf 100644
+--- i/src/hal/ParameterConvert.cpp
++++ w/src/hal/ParameterConvert.cpp
+@@ -39,6 +39,10 @@ int ParameterConvert::setParameters(const Parameters& param, DataContext* dataCo
+     CheckAndLogError(dataContext == nullptr, UNKNOWN_ERROR, "dataContext is nullptr");
+ 
+     param.getCropRegion(dataContext->cropRegion);
++    // Pan-tilt-zoom region (INTEL_CONTROL_SCALER_CROP_REGION): PipeManager turns it
++    // into a PTZ update of the output scalers (an ISP-side crop), but nothing copied
++    // it from the Parameters until now.
++    param.getZoomRegion(&dataContext->zoomRegion);
+     param.getDeinterlaceMode(dataContext->deinterlaceMode);
+     param.getMonoDsMode(dataContext->monoDsMode);
+ 
