@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Power-saver extras for the Surface Pro 12 (Intel). On this machine
+# power-profiles-daemon's power-saver only lowers the CPU energy preference
+# (EPP), which caps sustained load (a 4-thread job ran at 4.5 W instead of
+# 15.7 W) but leaves idle power where balanced has it. The firmware platform
+# profile it also sets changes nothing measurable.
+#
+# In power-saver this adds, measured on battery at idle (Nov 2026, ~4.9 W):
+#   Wi-Fi power save on                                   about -0.4 W
+#   PCIe ASPM powersupersave, runtime PM on every PCI dev about -0.3 W
+# and puts things back when another profile is chosen.
+# Things measured and left out: 60 Hz (PSR2 already idles the panel), GPU
+# frequency caps, RAPL/turbo limits (EPP already holds load lower), Bluetooth.
+# Don't enable VRR on the internal panel: it stops PSR and package C-states
+# (+3.5 W).
+#
+#   sp12-power-tune             show the profile and what is applied
+#   sp12-power-tune --apply     match the active profile (NetworkManager, resume)
+#   sp12-power-tune --restore   undo, whatever the profile (service stop)
+#   sp12-power-tune --watch     apply, then follow profile changes (the service)
+#
+# /etc/sp12/power-tune (optional) leaves parts alone:
+#   wifi=0   Wi-Fi power save stays as NetworkManager sets it (Omarchy turns
+#            it off: idle links can add 20-300 ms of latency)
+#   pcie=0   ASPM policy and PCI runtime PM stay as they are
+set -euo pipefail
+
+sys=${SP12_POWER_TUNE_SYS:-/sys}
+run=${SP12_POWER_TUNE_RUN:-/run/sp12-power-tune}
+conf=${SP12_POWER_TUNE_CONF:-/etc/sp12/power-tune}
+aspm=$sys/module/pcie_aspm/parameters/policy
+pci=$sys/bus/pci/devices
+
+wifi=1 pcie=1
+if [[ -r $conf ]]; then
+	while IFS='=' read -r key value; do
+		case $key in
+		wifi) wifi=$value ;;
+		pcie) pcie=$value ;;
+		esac
+	done < <(grep -E '^(wifi|pcie)=[01]$' "$conf" || true)
+fi
+
+log() { echo "sp12-power-tune: $*" >&2; }
+
+profile() {
+	busctl get-property org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
+		org.freedesktop.UPower.PowerProfiles ActiveProfile 2>/dev/null | sed -n 's/^s "\(.*\)"$/\1/p' || true
+}
+
+wifi_ifaces() { iw dev 2>/dev/null | awk '$1 == "Interface" { print $2 }' || true; }
+
+# What the system had before the first change, kept in /run so a restarted
+# service doesn't take its own settings for the originals.
+snapshot() {
+	[[ -f $run/runtime-pm ]] && return
+	mkdir -p "$run"
+	grep -o '\[[a-z]*\]' "$aspm" 2>/dev/null | tr -d '[]' >"$run/aspm" || true
+	local d
+	for d in "$pci"/*; do
+		[[ -r $d/power/control ]] && printf '%s %s\n' "${d##*/}" "$(<"$d/power/control")"
+	done >"$run/runtime-pm.tmp"
+	mv "$run/runtime-pm.tmp" "$run/runtime-pm"
+}
+
+saver_on() {
+	if ((pcie)); then
+		echo powersupersave >"$aspm" 2>/dev/null || log "ASPM policy not writable"
+		local d
+		for d in "$pci"/*; do
+			echo auto >"$d/power/control" 2>/dev/null || true
+		done
+	fi
+	if ((wifi)); then
+		local i
+		for i in $(wifi_ifaces); do
+			iw dev "$i" set power_save on || log "$i: power save not set"
+		done
+	fi
+	echo power-saver >"$run/applied"
+}
+
+saver_off() {
+	[[ -f $run/applied ]] || return 0
+	if ((pcie)); then
+		[[ -s $run/aspm ]] && { echo "$(<"$run/aspm")" >"$aspm" 2>/dev/null || log "ASPM policy not restored"; }
+		local dev control
+		while read -r dev control; do
+			echo "$control" >"$pci/$dev/power/control" 2>/dev/null || true
+		done <"$run/runtime-pm"
+	fi
+	if ((wifi)); then
+		local i
+		for i in $(wifi_ifaces); do
+			iw dev "$i" set power_save off || true
+		done
+	fi
+	rm -f "$run/applied"
+}
+
+locked() {
+	mkdir -p "$run"
+	exec 9>"$run/lock"
+	flock 9
+	snapshot
+	"$@"
+	exec 9>&-
+}
+
+apply() {
+	local p
+	p=$(profile)
+	if [[ $p == power-saver ]]; then
+		saver_on
+	else
+		saver_off
+	fi
+	log "profile ${p:-unknown}: power-saver extras $([[ -f $run/applied ]] && echo on || echo off)"
+}
+
+status() {
+	local p i
+	p=$(profile)
+	echo "Profile: ${p:-unknown}"
+	echo "Power-saver extras: $([[ -f $run/applied ]] && echo applied || echo "not applied")$( ((wifi && pcie)) || echo " (config: wifi=$wifi pcie=$pcie)")"
+	echo "PCIe ASPM: $(grep -o '\[[a-z]*\]' "$aspm" 2>/dev/null | tr -d '[]')"
+	echo "PCI runtime PM: $(cat "$pci"/*/power/control 2>/dev/null | sort | uniq -c | awk '{printf "%s%s %s", sep, $1, $2; sep=", "}')"
+	for i in $(wifi_ifaces); do
+		echo "Wi-Fi $i: $(iw dev "$i" get power_save 2>/dev/null | sed 's/^Power save: //')"
+	done
+}
+
+case "${1:-}" in
+"") status ;;
+--apply) locked apply ;;
+--restore) locked saver_off ;;
+--watch)
+	locked apply
+	# One line per PropertiesChanged; ends when the daemon goes away, and
+	# the service starts again with it.
+	gdbus monitor --system --dest org.freedesktop.UPower.PowerProfiles \
+		--object-path /org/freedesktop/UPower/PowerProfiles |
+		while read -r line; do
+			[[ $line == *ActiveProfile* ]] && locked apply
+		done
+	;;
+*)
+	echo "usage: sp12-power-tune [--apply|--restore|--watch]" >&2
+	exit 2
+	;;
+esac

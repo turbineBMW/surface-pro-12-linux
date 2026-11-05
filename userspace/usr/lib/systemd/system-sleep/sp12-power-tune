@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wi-Fi power save can come back from suspend at the driver default.
+[ "$1" = post ] || exit 0
+exec /usr/bin/sp12-power-tune --apply
