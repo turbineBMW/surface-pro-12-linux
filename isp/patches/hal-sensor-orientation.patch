@@ -1,0 +1,16 @@
+diff --git i/src/platformdata/CameraSensorsParser.cpp w/src/platformdata/CameraSensorsParser.cpp
+index 49f4238..c539884 100644
+--- i/src/platformdata/CameraSensorsParser.cpp
++++ w/src/platformdata/CameraSensorsParser.cpp
+@@ -802,6 +802,11 @@ void CameraSensorsParser::parseSensorSection(const Json::Value& node) {
+     if (node.isMember("graphSettingsFile")) {
+         mCurCam->mGraphSettingsFile = node["graphSettingsFile"].asString();
+     }
++    // Sensor mounting orientation (0 or 180). MediaControl applies 180 as
++    // HFLIP/VFLIP on the sensor at every stream start.
++    if (node.isMember("sensorOrientation")) {
++        mCurCam->mSensorOrientation = node["sensorOrientation"].asInt();
++    }
+     if (node.isMember("dvsType")) {
+         parseDVSType(node["dvsType"]);
+     }

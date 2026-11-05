@@ -1,0 +1,15 @@
+diff --git a/src/core/IpuPacAdaptor.cpp b/src/core/IpuPacAdaptor.cpp
+index a8aad3f..be252e8 100644
+--- a/src/core/IpuPacAdaptor.cpp
++++ b/src/core/IpuPacAdaptor.cpp
+@@ -347,6 +347,10 @@ status_t IpuPacAdaptor::runAIC(const IspSettings* ispSettings,
+     cca::cca_pal_input_params* inputParams = mStreamIdToInputParams[streamId];
+     inputParams->seq_id = settingSequence;
+     inputParams->stream_id = streamId;
++    // Mandatory per IntelCCATypes.h (microseconds); left at 0 upstream.
++    inputParams->timestamp = aiqResults->mTimestamp != 0
++                                 ? aiqResults->mTimestamp
++                                 : static_cast<uint64_t>(CameraUtils::systemTime() / 1000);
+ 
+     bool useLinearGamma = false;
+     applyMediaFormat(aiqResults, &inputParams->media_format, &useLinearGamma, settingSequence);

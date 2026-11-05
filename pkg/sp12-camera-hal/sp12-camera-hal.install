@@ -1,0 +1,23 @@
+post_install() {
+	cat <<'EOF'
+sp12-camera-hal: the cameras through the IPU7 hardware ISP appear as
+"Surface Front Camera ISP" and "Surface Rear Camera ISP" (v4l2loopback,
+fed on demand by v4l2-relayd). To start them now:
+  modprobe -r v4l2loopback; modprobe v4l2loopback
+  systemctl enable --now v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service
+then, in the desktop session: systemctl --user restart wireplumber
+They start at boot once enabled. The kernel side is sp12-modules-dkms
+(intel-ipu7-psys, 1.17 or later) with firmware intel/ipu/ipu7ptl_fw.bin.
+EOF
+}
+
+post_upgrade() {
+	if systemctl -q is-active v4l2-relayd@sp12-front.service 2>/dev/null ||
+	   systemctl -q is-active v4l2-relayd@sp12-rear.service 2>/dev/null; then
+		systemctl try-restart v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service
+	fi
+}
+
+pre_remove() {
+	systemctl disable --now v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service 2>/dev/null || true
+}

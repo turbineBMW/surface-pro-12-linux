@@ -1,0 +1,12 @@
+diff --git a/src/platformdata/JsonParserBase.h b/src/platformdata/JsonParserBase.h
+index c1d7d22..9f947cc 100644
+--- a/src/platformdata/JsonParserBase.h
++++ b/src/platformdata/JsonParserBase.h
+@@ -16,7 +16,7 @@
+ 
+ #pragma once
+ 
+-#include <jsoncpp/json/json.h>
++#include <json/json.h>
+ 
+ #include "src/iutils/Utils.h"

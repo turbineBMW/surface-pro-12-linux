@@ -1,0 +1,6 @@
+# Intel IPU7 PSYS (hardware ISP) on the in-tree ipu6 core, kernel 7.4+.
+# IPU6_SRC: the kernel's drivers/media/pci/intel/ipu6 (private headers).
+IPU6_SRC ?= $(src)/../isys
+intel-ipu7-psys-objs += ipu-psys.o ipu7-psys.o ipu7-fw-psys.o
+obj-m += intel-ipu7-psys.o
+ccflags-y += -I$(src) -I$(src)/uapi -I$(IPU6_SRC)

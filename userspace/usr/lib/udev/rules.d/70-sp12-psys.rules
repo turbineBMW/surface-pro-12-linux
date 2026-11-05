@@ -1,0 +1,4 @@
+# Surface Pro 12 (Intel): the IPU7 PSYS (hardware ISP) node is root-only by
+# default. Give it to the video group and to the seated user (uaccess ACL),
+# as the other camera nodes are.
+KERNEL=="ipu7-psys[0-9]*", GROUP="video", MODE="0660", TAG+="uaccess"

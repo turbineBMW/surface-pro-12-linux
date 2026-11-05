@@ -493,6 +493,15 @@ or colour matrix. Research Intel's out-of-tree IPU7 PSYS driver and camera HAL
 (closed components) on Arch: what exists, how it coexists with PipeWire/libcamera,
 and whether our DKMS/package approach can carry it.
 
+**Revisited 2026-11-04: viable; plan in [`hardware-isp-plan.md`](hardware-isp-plan.md).**
+Two of the findings below were wrong: the Windows `graph_settings_*.bin` are
+the HAL's own static-graph format (`0x5c63b5e7` is the Windows common hash, not
+a format marker) and already use the Linux linear graph 100002, and the 7.4
+`ipu6` driver now creates the IPU7 PSYS device and maps its firmware, so a PSYS
+module ports onto it rather than onto the staging core. Another laptop's sensor
+runs on PSYS from converted Windows files (ipu7-camera-hal#74). Also, face
+unlock gains nothing from PSYS: irlume refuses loopback devices.
+
 Findings (2026-09-24), hardware ISP not viable for now:
 - Intel's stack: `intel/ipu7-drivers` (PSYS module; on kernels >= 6.17 it builds only
   PSYS against the staging core; tested up to 7.0), `ipu7-camera-hal` (Panther Lake
