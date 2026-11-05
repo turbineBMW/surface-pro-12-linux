@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Automatic framing of the front camera (the ISP relay's sp12autoframe
+# element): follow the face(s) like Windows Studio Effects, or show the whole
+# field of view.
+#
+#   sp12-autoframe [auto|off|toggle|status] [--face F] [--zoom N] [--headroom H]
+#                  [--speed S] [--hold T] [--boxes on|off]
+#
+#   --face F      face height as a fraction of the frame: 0.30 default
+#                 (head and shoulders), 0.40 tight, 0.22 loose
+#   --zoom N      tightest crop allowed, 1 (never) .. 8; 2 keeps 1080p native
+#   --headroom H  face centre above frame centre, fraction of height (0.12)
+#   --speed S     how fast it moves, rad/s (4 default; 2 lazy, 8 snappy)
+#   --hold T      seconds to hold the shot after you leave (3)
+#
+# Writes /run/sp12/autoframe, which the relay re-reads within a second, so the
+# change applies to the running camera. Options not given keep their current
+# value from the file; the file is not persisted across boots yet.
+set -euo pipefail
+
+ctl=/run/sp12/autoframe
+
+current() {
+	local v
+	v=$(sed -n 's/^mode=\(.*\)$/\1/p' "$ctl" 2>/dev/null | tail -n1 || true)
+	[[ $v == off ]] && echo off || echo auto
+}
+
+# key=value settings carried over from the current file
+declare -A kv
+while IFS='=' read -r k v; do [[ -n $k && $k != mode ]] && kv[$k]=$v; done < <(grep '=' "$ctl" 2>/dev/null || true)
+
+usage() { echo "usage: sp12-autoframe [auto|off|toggle|status] [--face F] [--zoom N] [--headroom H] [--speed S] [--hold T] [--boxes on|off]" >&2; exit 2; }
+num() { [[ $1 =~ ^-?[0-9]*\.?[0-9]+$ ]] || usage; echo "$1"; }
+
+want=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	auto | off) want=$1 ;;
+	toggle) [[ $(current) == auto ]] && want=off || want=auto ;;
+	status | "")
+		echo "$(current)"
+		for k in "${!kv[@]}"; do echo "$k=${kv[$k]}"; done | sort
+		exit 0
+		;;
+	--face) kv[face-frac]=$(num "${2:-}"); shift ;;
+	--zoom) kv[max-zoom]=$(num "${2:-}"); shift ;;
+	--headroom) kv[headroom]=$(num "${2:-}"); shift ;;
+	--speed) kv[speed]=$(num "${2:-}"); shift ;;
+	--hold) kv[hold-time]=$(num "${2:-}"); shift ;;
+	--boxes) kv[draw-boxes]=$([[ ${2:-} == on ]] && echo 1 || echo 0); shift ;;
+	*) usage ;;
+	esac
+	shift
+done
+[[ -n $want ]] || want=$(current)
+
+[[ -d $(dirname "$ctl") ]] || { echo "sp12-autoframe: $(dirname "$ctl") missing (is the ISP relay installed?)" >&2; exit 1; }
+{
+	echo "mode=$want"
+	for k in "${!kv[@]}"; do echo "$k=${kv[$k]}"; done | sort
+} >"$ctl.tmp.$$"
+mv -f "$ctl.tmp.$$" "$ctl"
+echo "$want"

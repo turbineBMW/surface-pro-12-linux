@@ -62,6 +62,12 @@
         "StaticMetadata": {
           "supportedStreamConfig": [
             {
+              "format": "V4L2_PIX_FMT_NV12", "size": [3840, 2160], "field": 0, "mcId": 0
+            },
+            {
+              "format": "V4L2_PIX_FMT_NV12", "size": [2560, 1440], "field": 0, "mcId": 0
+            },
+            {
               "format": "V4L2_PIX_FMT_NV12", "size": [1920, 1080], "field": 0, "mcId": 0
             },
             {
