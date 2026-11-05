@@ -288,6 +288,12 @@ static gboolean gst_sp12_autoframe_set_info(GstVideoFilter *filter, GstCaps *inc
     }
     apply_params(self);
     GST_OBJECT_UNLOCK(self);
+    /* In place only when the sizes match (ISP mode). In crop mode the 1080p
+     * result used to be written back into icamerasrc's 4K buffer, and reading
+     * it there was slow: the relay's colour conversion took 17.7 ms per frame
+     * on it against 3.8 ms on a copy, half a core. A fresh output buffer
+     * (transform_frame) costs nothing extra: the crop writes it anyway. */
+    gst_base_transform_set_in_place(GST_BASE_TRANSFORM(filter), st->in_w == st->out_w && st->in_h == st->out_h);
     st->dets.clear();
     st->sent.clear();
     st->last_sent = {0, 0, 0, 0};

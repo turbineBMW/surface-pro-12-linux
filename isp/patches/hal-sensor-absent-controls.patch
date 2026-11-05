@@ -1,0 +1,115 @@
+Skip sensor controls the driver does not offer
+
+The AIQ sends digital gain, frame duration (VBLANK/HBLANK) and the test
+pattern mode with every request. The IMX681 driver has no digital gain or
+test pattern control and fixed, read-only blanking, so each frame logged
+three or four SetControl errors (EINVAL, EPERM). Ask the driver once per
+control and skip the write when it is absent or read-only; a test pattern
+of "off" on a sensor without the control succeeds.
+
+Surface Pro 12 (Intel), sp12-camera-hal.
+
+diff --git i/src/core/SensorHwCtrl.cpp w/src/core/SensorHwCtrl.cpp
+index 65d26b7..990e0bb 100644
+--- i/src/core/SensorHwCtrl.cpp
++++ w/src/core/SensorHwCtrl.cpp
+@@ -47,7 +47,11 @@ SensorHwCtrl::SensorHwCtrl(int cameraId, V4L2Subdevice* pixelArraySubdev,
+           mWdrMode(0),
+           // HDR_FEATURE_E
+           mCurFll(0),
+-          mCalculatingFrameDuration(true) {
++          mCalculatingFrameDuration(true),
++          mDigitalGainCtrl(-1),
++          mTestPatternCtrl(-1),
++          mVblankCtrl(-1),
++          mHblankCtrl(-1) {
+     LOG1("<id%d> @%s", mCameraId, __func__);
+     // CRL_MODULE_S
+     /**
+@@ -135,11 +139,30 @@ int SensorHwCtrl::getPixelRate(int& pixelRate) {
+     return ret;
+ }
+ 
++bool SensorHwCtrl::canSetControl(int id, int& state) {
++    if (state < 0) {
++        v4l2_queryctrl query = {};
++        query.id = id;
++        state = (mPixelArraySubdev->QueryControl(&query) == OK &&
++                 (query.flags & (V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_DISABLED)) == 0)
++                    ? 1 : 0;
++        if (state == 0) {
++            LOGI("<id%d> sensor control 0x%x is absent or read-only, not setting it",
++                 mCameraId, id);
++        }
++    }
++    return state == 1;
++}
++
+ int SensorHwCtrl::setTestPatternMode(int32_t testPatternMode) {
+     HAL_TRACE_CALL(CAMERA_DEBUG_LOG_LEVEL2);
+     CheckAndLogError(mPixelArraySubdev == nullptr, NO_INIT, "pixel array sub device is not set");
+ 
+     LOG2("@%s, testPatternMode: %d", __func__, testPatternMode);
++    if (!canSetControl(V4L2_CID_TEST_PATTERN, mTestPatternCtrl)) {
++        // Off is what a sensor without the control does anyway.
++        return testPatternMode == 0 ? OK : BAD_VALUE;
++    }
+     return mPixelArraySubdev->SetControl(V4L2_CID_TEST_PATTERN, testPatternMode);
+ }
+ 
+@@ -275,6 +298,9 @@ int SensorHwCtrl::setDigitalGains(const vector<int>& digitalGains) {
+     // CRL_MODULE_E
+ 
+     LOG2("%s digitalGain=%d", __func__, digitalGains[0]);
++    if (!canSetControl(V4L2_CID_DIGITAL_GAIN, mDigitalGainCtrl)) {
++        return OK;
++    }
+     int status = mPixelArraySubdev->SetControl(V4L2_CID_DIGITAL_GAIN, digitalGains[0]);
+     CheckAndLogError((status != 0), status, "failed to set digitalGain gain %d.", digitalGains[0]);
+ 
+@@ -359,7 +385,7 @@ int SensorHwCtrl::setLineLengthPixels(int llp) {
+ 
+     if (mCalculatingFrameDuration) {
+         const int horzBlank = llp - mCropWidth;
+-        if (mHorzBlank != horzBlank) {
++        if (mHorzBlank != horzBlank && canSetControl(V4L2_CID_HBLANK, mHblankCtrl)) {
+             status = mPixelArraySubdev->SetControl(V4L2_CID_HBLANK, horzBlank);
+         }
+         // CRL_MODULE_S
+@@ -380,7 +406,7 @@ int SensorHwCtrl::setFrameLengthLines(int fll) {
+ 
+     if (mCalculatingFrameDuration) {
+         const int vertBlank = fll - mCropHeight;
+-        if (mVertBlank != vertBlank) {
++        if (mVertBlank != vertBlank && canSetControl(V4L2_CID_VBLANK, mVblankCtrl)) {
+             status = mPixelArraySubdev->SetControl(V4L2_CID_VBLANK, vertBlank);
+         }
+         // CRL_MODULE_S
+diff --git i/src/core/SensorHwCtrl.h w/src/core/SensorHwCtrl.h
+index 1963eb3..d55b5d0 100644
+--- i/src/core/SensorHwCtrl.h
++++ w/src/core/SensorHwCtrl.h
+@@ -77,6 +77,8 @@ class SensorHwCtrl {
+     int getLineLengthPixels(int& llp);
+     int setFrameLengthLines(int fll);
+     int getFrameLengthLines(int& fll);
++    // SP12: whether the sensor driver offers a writable control; asked once
++    bool canSetControl(int id, int& state);
+ 
+     // CRL_MODULE_S
+     int setMultiExposures(const std::vector<int>& coarseExposures,
+@@ -110,6 +112,14 @@ class SensorHwCtrl {
+      * use HBlank/VBlank to calculate it.
+      */
+     bool mCalculatingFrameDuration;
++
++    // SP12: -1 not asked yet, 0 absent or read-only, 1 writable. The AIQ
++    // sends digital gain, frame duration and the test pattern every frame;
++    // a sensor driver without those controls (IMX681) failed each write.
++    int mDigitalGainCtrl;
++    int mTestPatternCtrl;
++    int mVblankCtrl;
++    int mHblankCtrl;
+ };  // class SensorHwCtrl
+ 
+ /**

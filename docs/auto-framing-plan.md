@@ -249,45 +249,86 @@ Decision: package 0.4 defaults the relay to **crop mode** (4K, CPU crop,
 - **Surface Pro 11**: same idea, different pipeline (CAMSS/libcamera); the
   element and controller are reusable, the source and crop stage are not.
 
-## 7. Next steps (found 2026-11-05 evening, during the power work)
+## 7. Camera stack with HAL errors visible (2026-11-05 evening)
 
 The power-saver branch (PR #14) changed the relays' `cameraDebug` from 0x1
 to 0x60. 0x1 was LV1 debug that *replaces* the HAL's default mask, so until
 then the relays logged every thread wait and **no errors or warnings**. With
-errors visible, the installed stack (sp12-autoframe 0.4, crop mode; HAL
-pkgrel 5) shows the following. None of it is fixed yet.
+errors visible, a first pass over the installed stack (sp12-autoframe 0.4,
+crop mode; HAL pkgrel 5) found per-frame sensor errors, a test client that
+got no frames and a relay at more than a core. Checked and fixed in
+sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
 
-1. **Check that the front camera still delivers frames.** Test clients got
-   none within the time limit: `v4l2-ctl --stream-mmap --stream-count=30`
-   (25 s), `gst-launch-1.0 v4l2src num-buffers=90 ! fakesink` (30 s) and
-   200 buffers (40 s). The HAL opened and closed the camera cleanly each
-   time. This was the same before and after the log-level change, so the
-   change is not the cause. It may be the test method (loopback format
-   negotiation), so first try a real client (browser through PipeWire,
-   `qv4l2`). If that fails too, compare against the plain 1080p relay
-   (`sp12-front.conf` without the autoframe file).
-2. **Per-frame sensor control errors on the IMX681** (`/dev/v4l-subdev5`,
-   `imx681 1-0010`), each about once per frame:
-   - `SetControl ... error: Invalid argument` (twice per frame)
-   - `SetControl ... error: Permission denied` (once per frame)
-   - `SensorHwCtrl: failed to set fll`
-   - `SensorHwCtrl: failed to set digitalGain`
-   - `CameraDevice: handleEvent, set test Pattern Mode failed`
-
-   The subdev exposes only `exposure` (4–3173) and `analogue_gain` (0–960).
-   There is no `vblank` (the HAL's fll), digital gain or test-pattern
-   control. Either add them to the imx681 driver (DKMS patch 0010 series) or
-   stop the HAL's sensor profile from asking for them. The EPERM is still
-   unidentified: find which control ID it is, likely a read-only one.
-3. **Hypothesis: AE without fll might add to the dim-room noise.** In a dim
-   room exposure sat at 3139/3173 and analogue gain at 954/960. Without a
-   writable `vblank`, the HAL cannot lengthen the frame for more exposure,
-   so AE may lean on gain instead. Worth checking alongside the TNR finding
-   in section 5 once `vblank` is writable.
-4. **Relay CPU while streaming.** In this test the front relay used about
-   34 s of CPU in about 28 s (≈1.2 cores). Earlier measurements were 25 %
-   of a core for crop mode and 17 % for ISP mode. Re-measure once item 1 is
-   settled; part of it may have been the per-frame error logging above.
+1. **Per-frame IMX681 control errors: fixed** (`isp/patches/hal-sensor-absent-controls.patch`).
+   Three or four `SetControl` errors per frame on `/dev/v4l-subdev5`. The
+   AIQ sends digital gain (always 256, 1.0×), the frame length and, because
+   our profile has a `testPatternMap`, test pattern "off" with every request.
+   The imx681 driver has no digital gain or test-pattern control (`EINVAL`),
+   and its `vertical_blanking` exists but is read-only, fixed at 537
+   (`EPERM`, the "failed to set fll": the HAL asks for 3178 lines against the
+   fixed 3177). The driver keeps those out on purpose for upstream (no
+   unverified digital gain, no test pattern, fixed blanking for the one
+   mode), so the HAL now asks the driver once per control and skips writes
+   to absent or read-only ones; "off" on a sensor without a test pattern
+   succeeds. What is left per camera open: two `QueryControl` warnings and
+   two older one-off messages. The rear (OV13858 has all these controls) is
+   unchanged.
+2. **Relay CPU: fixed** (`sp12autoframe`, package 0.5). The front relay used
+   **50 %** of a core while streaming, the rear 10 %. The errors were not the
+   cost (gone, CPU unchanged). Stack samples put it in the relay's output
+   half, `appsrc ! videoconvert ! v4l2sink`: that `videoconvert` turns the
+   stream into the BT.601 matrix the loopback advertises, and on the front it
+   took 17.7 ms per frame against 3.8 ms on the rear's frames or on a copy of
+   the front's (measured outside the relay, as root, 300 frames). In crop
+   mode the element was always-in-place, so its 1080p result was written
+   back into icamerasrc's 4K buffer, and reading it back from there is that
+   slow. The element now writes a fresh buffer when the sizes differ (ISP
+   mode stays in place). Front relay now **20 %**.
+   Left over: both relays spend about 10 % of a core (3.5 ms per frame) on
+   that BT.709 → BT.601 conversion. The relay's `appsrc` caps carry no
+   colorimetry, so GStreamer assumes BT.709 for HD, while v4l2loopback
+   advertises Rec. 709 primaries with the BT.601 matrix. If the ISP's NV12 is
+   really BT.601, labelling it so removes the conversion and is more correct;
+   if it is BT.709, the conversion is right and only its cost could move.
+   Not checked yet.
+3. **A second, broken relay at every boot: fixed** (package 0.5). The relay
+   environment file was `/etc/v4l2-relayd.d/sp12-front-autoframe.conf`, and
+   v4l2-relayd's generator starts one instance per `*.conf` in that
+   directory, so `v4l2-relayd@sp12-front-autoframe` started, restarted five
+   times while the real front relay came up, and ended `failed`. Now
+   `sp12-front-autoframe.env`; the upgrade stops and resets the old unit.
+4. **AE/AWB start cold on every open: fixed** (HAL pkgrel 6). The HAL keeps
+   its AIQ state (AIQD) in `/run/camera` and warned on every open that the
+   file was missing: the directory did not exist. A tmpfiles entry creates
+   it; the HAL now saves `imx681-uf_VIDEO.aiqd` on close and loads it on the
+   next open.
+5. **Front camera sometimes gives no frames: cause found, not fixed.** The
+   test clients of the first pass found the loopback output-only ("not a
+   capture device"). Omarchy's v4l2-relayd 0.2.0-2.2 carries
+   `0001-reset-output-on-idle.patch`: when the last client leaves after a
+   session of more than 3 s, it sets the output pipeline to READY and back to
+   PLAYING, which makes `v4l2sink` stream off. With `exclusive_caps` the
+   loopback then announces only OUTPUT until the writer streams again, and
+   the splash pipeline, set to PLAYING right after, pushes no frame (gdb
+   tracepoints: `gst_app_src_push_buffer` is never called after the reset).
+   So no app can open the device, the relay never hears of a client, and the
+   camera is dead until the relay restarts. Seen seven times on 2026-11-05
+   and reproducible: two 18 s captures, then a pause with no new client (a
+   capture on the other camera will do). A client that opens within the
+   ~140 ms before the reset escapes it; sessions under 3 s never trigger it.
+   Both relays are affected. v4l2loopback's `keep_format` does not help: it keeps the
+   CAPTURE capability but `check_buffer_capability` still refuses capture
+   format calls while no writer streams. The fix belongs in v4l2-relayd:
+   drop the reset or make sure a frame reaches `v4l2sink` after it.
+6. **Low light, next step.** In a dim room exposure sat at 3139 of 3173 and
+   analogue gain at 954 of 960. The exposure maximum is the frame length
+   minus 4: with `vblank` fixed the frame is 7552 × 3177 at 720 MHz, exactly
+   30 fps, so AE can never expose longer than 33 ms and has only gain left,
+   although the sensor profile allows 15–30 fps (`fpsRange`). A writable
+   `vblank` (frame length at 0x033E, written under group hold in the Windows
+   trace) would let AE drop to 15 fps in the dark the way the tuning
+   expects. Needs a hardware check that the register lengthens the frame;
+   probably more effect on dim-room noise than the TNR question in section 5.
 
 At idle the relays cost nothing measurable (no context switches in 15
 minutes, before or after serving a client), so on-demand starting is not

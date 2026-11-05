@@ -46,7 +46,7 @@ path, kept for hardware without the patched HAL).
   against a dev prefix.
 - `../pkg/sp12-autoframe`: the package: the plugin in `/usr/lib/gstreamer-1.0`,
   the model in `/usr/share/sp12`, the toggle, a second relay environment file
-  (`/etc/v4l2-relayd.d/sp12-front-autoframe.conf`, loaded after the relay's
+  (`/etc/v4l2-relayd.d/sp12-front-autoframe.env`, loaded after the relay's
   own by the unit drop-in so its `VIDEOSRC` wins and removing the package
   leaves the plain relay), the NPU device rule for the unit, tmpfiles for
   `/run/sp12`, and a user unit that restores the saved settings at login.

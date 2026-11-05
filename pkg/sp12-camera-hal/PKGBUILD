@@ -11,7 +11,7 @@
 pkgname=sp12-camera-hal
 # The HAL release (ipu7-camera-hal e5172cc, 2025-12-10).
 pkgver=2025.12.10
-pkgrel=5
+pkgrel=6
 pkgdesc="Intel IPU7 camera HAL and icamerasrc with the Surface Pro 12 configuration (hardware ISP)"
 arch=(x86_64)
 url="https://github.com/intel/ipu7-camera-hal"
@@ -107,4 +107,9 @@ PY
 	done
 	install -Dm644 "$u/etc/modprobe.d/sp12-v4l2loopback.conf" \
 		"$pkgdir/usr/lib/modprobe.d/sp12-v4l2loopback.conf"
+	# The HAL keeps the AE/AWB state (AIQD) between camera opens in
+	# /run/camera (CAMERA_AIQD_PATH); without the directory every open
+	# started cold and logged a warning.
+	install -d "$pkgdir/usr/lib/tmpfiles.d"
+	echo 'd /run/camera 0700 root root -' > "$pkgdir/usr/lib/tmpfiles.d/sp12-camera-hal.conf"
 }

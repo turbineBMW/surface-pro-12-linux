@@ -9,7 +9,7 @@
 # ../../autoframe and ../../userspace; the model comes from OpenCV Zoo.
 
 pkgname=sp12-autoframe
-pkgver=0.4
+pkgver=0.5
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): automatic framing (face-following crop) for the front camera through the ISP relay"
 arch=('x86_64')
@@ -19,7 +19,7 @@ depends=('gstreamer' 'gst-plugins-base-libs' 'openvino' 'openvino-intel-npu-plug
          'sp12-camera-hal>=2025.12.10-4' 'v4l2-relayd' 'intel-npu-driver')
 optdepends=('openvino-intel-gpu-plugin: GPU fallback for the face detector')
 makedepends=('meson' 'ninja' 'pkgconf')
-backup=('etc/v4l2-relayd.d/sp12-front-autoframe.conf')
+backup=('etc/v4l2-relayd.d/sp12-front-autoframe.env')
 install=sp12-autoframe.install
 options=('!debug')
 # YuNet (Apache-2.0), pinned to an OpenCV Zoo commit.
@@ -39,8 +39,8 @@ package() {
 	install -Dm644 "${srcdir}/face_detection_yunet_2023mar-${_zoo:0:7}.onnx" \
 		"${pkgdir}/usr/share/sp12/face_detection_yunet_2023mar.onnx"
 	install -Dm755 "$u/usr/local/bin/sp12-autoframe" "${pkgdir}/usr/bin/sp12-autoframe"
-	install -Dm644 "$u/etc/v4l2-relayd.d/sp12-front-autoframe.conf" \
-		"${pkgdir}/etc/v4l2-relayd.d/sp12-front-autoframe.conf"
+	install -Dm644 "$u/etc/v4l2-relayd.d/sp12-front-autoframe.env" \
+		"${pkgdir}/etc/v4l2-relayd.d/sp12-front-autoframe.env"
 	install -Dm644 "$u/usr/lib/systemd/system/v4l2-relayd@sp12-front.service.d/sp12-autoframe.conf" \
 		"${pkgdir}/usr/lib/systemd/system/v4l2-relayd@sp12-front.service.d/sp12-autoframe.conf"
 	install -Dm644 "$u/usr/lib/tmpfiles.d/sp12-autoframe.conf" \

@@ -7,7 +7,7 @@
 #   sudo autoframe/install-dev.sh            # crop mode: 4K from the ISP, crop in the element
 #   AUTOFRAME_MODE=isp sudo -E autoframe/install-dev.sh   # ISP mode: 1080p, zoom-region upstream
 # With the sp12-autoframe package installed its relay environment file
-# (sp12-front-autoframe.conf) carries the pipeline and is the one rewritten.
+# (sp12-front-autoframe.env) carries the pipeline and is the one rewritten.
 set -eu
 MODE=${AUTOFRAME_MODE:-crop}
 HERE=$(dirname "$(readlink -f "$0")")
@@ -15,7 +15,7 @@ D=/opt/sp12-autoframe-dev
 MODEL_SRC=${MODEL_SRC:-/usr/share/irlume/models/face_detection_yunet_2023mar.onnx}
 HALCFG=/usr/share/defaults/etc/camera/ipu75xa
 CONF=/etc/v4l2-relayd.d/sp12-front.conf
-[ -f /etc/v4l2-relayd.d/sp12-front-autoframe.conf ] && CONF=/etc/v4l2-relayd.d/sp12-front-autoframe.conf
+[ -f /etc/v4l2-relayd.d/sp12-front-autoframe.env ] && CONF=/etc/v4l2-relayd.d/sp12-front-autoframe.env
 
 install -Dm644 "$HERE/build/gstsp12autoframe.so" "$D/gstreamer-1.0/gstsp12autoframe.so"
 install -Dm644 "$MODEL_SRC" "$D/face_detection_yunet_2023mar.onnx"
