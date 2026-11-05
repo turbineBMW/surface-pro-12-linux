@@ -1,0 +1,53 @@
+# Automatic framing (sp12autoframe)
+
+Windows Studio Effects' *Automatic framing* for the front camera: a GStreamer
+element that sits in the hardware-ISP relay, finds the face(s) with a YuNet
+detector on the NPU (OpenVINO) and crops a 16:9 window out of the 4K ISP
+output that follows them, scaled to 1080p. Plan and findings:
+`docs/auto-framing-plan.md`.
+
+```
+icamerasrc (IMX681, PSYS, NV12 3840x2160) ! sp12autoframe ! NV12 1920x1080 ! videoconvert  →  v4l2-relayd → loopback → PipeWire
+```
+
+## Layout
+
+- `src/gstsp12autoframe.cpp`: the element (`GstVideoFilter`, NV12 in at any
+  size, NV12 out at the negotiated size). Properties: `enable`, `device`
+  (NPU, falls back to GPU, CPU), `model`, `det-width`/`det-height`,
+  `max-zoom`, `face-frac`, `headroom`, `speed`, `hold-time`, `group`,
+  `detect-interval`, `control-file`, `draw-boxes`.
+- `src/framing.h`: the controller (target box, dead zone, critically damped
+  spring, presence hysteresis, hold). `proto/framing.py` is the same thing in
+  Python; keep them in step.
+- `src/yunet.{h,cpp}`: YuNet through OpenVINO, output decoding and NMS.
+- `proto/`: stage-0 prototypes: `run_frames.py` (detector on the recorded
+  frames under `private/camera/frames`), `sim.py` (controller on a synthetic
+  track, writes `sim.csv`), `ppm2nv12.py` (test clip for the element).
+- `install-dev.sh` / `uninstall-dev.sh` (root): stage the plugin, the model
+  and a HAL config copy with 4K output under `/opt/sp12-autoframe-dev`, add
+  the relay drop-in (plugin path, config path, NPU device access), rewrite
+  the relay's source pipeline, restart the relay.
+- `../userspace/usr/local/bin/sp12-autoframe`: user-side toggle
+  (`auto|off|toggle|status`, `--zoom N`, `--boxes on|off`) through
+  `/run/sp12/autoframe`, re-read by the element within a second.
+
+## Build and offline test
+
+```sh
+meson setup build && ninja -C build
+# a test clip from recorded frames, then the element on it, boxes drawn:
+python proto/ppm2nv12.py /tmp/x/front.nv12 private/camera/frames/front-cam0-stream0-*.ppm
+GST_PLUGIN_PATH=build gst-launch-1.0 filesrc location=/tmp/x/front.nv12 ! \
+  rawvideoparse format=nv12 width=1920 height=1080 framerate=30/1 ! \
+  sp12autoframe model=/usr/share/irlume/models/face_detection_yunet_2023mar.onnx draw-boxes=true ! \
+  video/x-raw,width=960,height=540 ! videoconvert ! pngenc ! multifilesink location=/tmp/x/out-%03d.png
+```
+
+`GST_DEBUG=sp12autoframe:5` logs the per-frame cost every 300 frames.
+
+## Model
+
+YuNet `face_detection_yunet_2023mar.onnx` (OpenCV Zoo, Apache-2.0). The dev
+install copies the one `irlume` ships; the package will carry its own copy.
+Nothing from Microsoft's effect pack is used.
