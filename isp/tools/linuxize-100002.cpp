@@ -8,7 +8,7 @@
 //   word 36 [31:24]: 1 for packed input, 0 on Linux.
 // Link 2 (ISYS -> LBFF) carries stride*height bytes. Intel's Linux graphs also
 // stream links 7, 8 and 10 (mode 2) and set 0x00020000 in word 34 of the BBPS
-// input/output records (25579, 20865). Blocks shared by several settings are
+// records at both ends of those links. Blocks shared by several settings are
 // rewritten once. Graph 100003 and 100026 settings are left as they are.
 //   linuxize-100002 <in.bin> <out.bin> [--windows-links]
 #include "Ipu75xaStaticGraphAutogen.h"
@@ -84,9 +84,15 @@ int main(int argc, char** argv) {
         setWord(ifd, 36, getWord(ifd, 36) & 0x00ffffffU);
         b.linkConfigurations[2].bufferSize = frame;
         if (linuxLinks) {
+            // Links 7 (38648 -> 6907), 8 (59680 -> 57803) and 10 (20865 ->
+            // 25579) stream in Intel's Linux graphs; their endpoint records
+            // carry 0x00020000 in word 34.
             auto& bb = b.bbpsWithTnrOuterNodeConfiguration;
-            for (uint16_t uuid : {25579, 20865})
+            for (uint16_t uuid : {25579, 20865, 57803, 6907})
                 if (uint8_t* r = kernelApi<BbpsWithTnrMeta>(bb.systemApiConfiguration, uuid))
+                    setWord(r, 34, getWord(r, 34) | 0x00020000U);
+            for (uint16_t uuid : {38648, 59680})
+                if (uint8_t* r = kernelApi<LbffBayerMeta>(lb.systemApiConfiguration, uuid))
                     setWord(r, 34, getWord(r, 34) | 0x00020000U);
             for (int l : {7, 8, 10}) b.linkConfigurations[l].streamingMode = 2;
         }

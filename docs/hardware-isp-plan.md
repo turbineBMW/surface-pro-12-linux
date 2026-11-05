@@ -337,6 +337,36 @@ blocks with Intel's Linux OV13B10/OV08X40 graphs of the same release
   `ipu6_isys_try_fmt_cap`), not Windows' 25-in-32, so stage 3's option 1 is
   out; the ifd rewrite is the path.
 
+**Stage 3 done (2026-11-04): first PSYS frames, clean.** `isp/build-dev.sh`
+built HAL + icamerasrc + closed libs; `isp/run-dev.sh imx681-uf 1920x1080`
+delivers NV12 frames through ISYS → HAL → PSYS with 0 errors or warnings in
+the HAL log: a real demosaiced, denoised scene, AE converging over ~12
+frames, chroma near neutral, correct geometry (`isp/tools/nv12-frames.py`
+for the statistics and a frame export).
+
+A detour worth recording. The first analysis showed a band of garbage at
+the top growing 1.5 rows per frame and the picture sliding down at the same
+rate, plus a seam at the centre column, identical across every variable:
+Windows vs Linux link modes, our graph vs Intel's own OV08X40 graph and
+tuning with an injected static frame, 3A cadence, the AIC timestamp patch,
+DVS type, an unoptimised HAL build, `frame_id`, Windows' A-stepping
+firmware, and **our PSYS port on the ipu6 core vs Intel's unmodified module
+on the 7.4 staging `intel_ipu7` core**. The TNR reference the firmware wrote
+back was byte-stable. The cause was the measurement: the HAL allocates NV12
+output buffers with one extra line (1920 × 1081 × 1.5 = 3113280 bytes),
+`filesink` writes whole buffers, and parsing the file in 3110400-byte frames
+starts every frame N 1.5·N rows early. With the right stride there is no
+band, no slide and no seam. Useful by-products: Intel's unmodified module
+builds against the staging core with PR #120 and works there too (so both
+cores are fine, and the fallback route is real); the Windows A-stepping
+firmware (`1.2.1.250813150451/59`) authenticates and runs on this IPU; the
+HAL's per-frame payloads can be dumped with `cameraDump=0x800`; the ipu6 and
+staging DMA layers both refuse non-page-aligned scatterlists, which is why
+the HAL's buffers are all page-aligned.
+- Checked and equal between the cores: PSYS frequency formula, boot-config
+  units (MHz = 0), psys config ABI layout, buffer sizes the HAL maps (10 ×
+  3113472 / 196352 / 130560, flags 0x1c).
+
 ## 6. Risks and unknowns
 
 - The `ifd` words and BBPS flag bits Glauser copied "by comparison rather than
