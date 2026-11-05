@@ -37,6 +37,14 @@ icamerasrc (IMX681, PSYS, NV12 3840x2160) ! sp12autoframe ! NV12 1920x1080 ! vid
   `/run/sp12`, and a user unit that restores the saved settings at login.
   Needs the 4K entries in the HAL profile (sp12-camera-hal built from
   `isp/config/sensors/imx681-uf.json` after 2026-11-05).
+- `../userspace/omarchy/plugins/sp12.autoframe`: Omarchy bar widget (Quickshell
+  QML): a camera icon in the bar (right-click switches), and a popup with
+  Follow me / Full view, Loose / Normal / Tight presets, sliders for face
+  size, zoom limit, headroom, speed and hold, the detection-box overlay and a
+  reset. It watches `/run/sp12/autoframe` and drives everything through the
+  tool, so CLI and widget stay in sync. `sp12-autoframe plugin install` copies
+  it to `~/.config/omarchy/plugins` and enables it; `omarchy-shell
+  sp12.autoframe open|close|toggle` summons it.
 - `../userspace/usr/local/bin/sp12-autoframe`: user-side control
   (`auto|off|toggle|status|restore`, `--face F`, `--zoom N`, `--headroom H`,
   `--speed S`, `--hold T`, `--boxes on|off`) through `/run/sp12/autoframe`,

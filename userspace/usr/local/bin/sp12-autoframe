@@ -5,6 +5,7 @@
 #
 #   sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N]
 #                  [--headroom H] [--speed S] [--hold T] [--boxes on|off]
+#   sp12-autoframe plugin install|remove   the Omarchy bar widget (sp12.autoframe)
 #
 #   --face F      face height as a fraction of the frame: 0.30 default
 #                 (head and shoulders), 0.40 tight, 0.22 loose
@@ -34,6 +35,27 @@ declare -A kv
 while IFS='=' read -r k v; do [[ -n $k && $k != mode ]] && kv[$k]=$v; done < <(grep '=' "$ctl" 2>/dev/null || true)
 
 usage() { echo "usage: sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N] [--headroom H] [--speed S] [--hold T] [--boxes on|off]" >&2; exit 2; }
+
+plugin_id=sp12.autoframe
+plugin_src=/usr/share/sp12/omarchy/plugins/$plugin_id
+plugin_dst="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$plugin_id"
+if [[ ${1:-} == plugin ]]; then
+	case "${2:-}" in
+	install)
+		[[ -d $plugin_src ]] || { echo "sp12-autoframe: plugin source missing: $plugin_src" >&2; exit 1; }
+		rm -rf "$plugin_dst" && mkdir -p "$(dirname "$plugin_dst")" && cp -a "$plugin_src" "$plugin_dst"
+		omarchy plugin enable "$plugin_id" || true
+		echo "installed $plugin_dst (bar widget: Camera framing)"
+		;;
+	remove)
+		omarchy plugin disable "$plugin_id" || true
+		rm -rf "$plugin_dst"
+		echo "removed $plugin_dst"
+		;;
+	*) echo "usage: sp12-autoframe plugin install|remove" >&2; exit 2 ;;
+	esac
+	exit 0
+fi
 
 if [[ ${1:-} == restore ]]; then
 	[[ -f $conf ]] || exit 0

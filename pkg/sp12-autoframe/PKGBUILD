@@ -2,18 +2,19 @@
 #
 # Automatic framing for the Surface Pro 12 (Intel) front camera: a GStreamer
 # element in the hardware-ISP relay that follows the face(s) with a YuNet
-# detector on the NPU (OpenVINO), like Windows Studio Effects. Sources:
+# detector on the NPU (OpenVINO), like Windows Studio Effects, with a CLI and
+# an Omarchy bar widget to drive it. Sources:
 # ../../autoframe and ../../userspace; the model comes from OpenCV Zoo.
 
 pkgname=sp12-autoframe
-pkgver=0.1
+pkgver=0.2
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): automatic framing (face-following crop) for the front camera through the ISP relay"
 arch=('x86_64')
 url="https://github.com/turbineBMW/surface-pro-12-linux"
 license=('MIT' 'Apache-2.0')
 depends=('gstreamer' 'gst-plugins-base-libs' 'openvino' 'openvino-intel-npu-plugin' 'opencv'
-         'sp12-camera-hal' 'v4l2-relayd' 'intel-npu-driver')
+         'sp12-camera-hal>=2025.12.10-3' 'v4l2-relayd' 'intel-npu-driver')
 optdepends=('openvino-intel-gpu-plugin: GPU fallback for the face detector')
 makedepends=('meson' 'ninja' 'pkgconf')
 backup=('etc/v4l2-relayd.d/sp12-front-autoframe.conf')
@@ -44,6 +45,12 @@ package() {
 		"${pkgdir}/usr/lib/tmpfiles.d/sp12-autoframe.conf"
 	install -Dm644 "$u/usr/lib/systemd/user/sp12-autoframe.service" \
 		"${pkgdir}/usr/lib/systemd/user/sp12-autoframe.service"
+	# Omarchy bar widget; `sp12-autoframe plugin install` copies it into the
+	# user's plugin directory and enables it.
+	install -Dm644 "$u/omarchy/plugins/sp12.autoframe/manifest.json" \
+		"${pkgdir}/usr/share/sp12/omarchy/plugins/sp12.autoframe/manifest.json"
+	install -Dm644 "$u/omarchy/plugins/sp12.autoframe/Panel.qml" \
+		"${pkgdir}/usr/share/sp12/omarchy/plugins/sp12.autoframe/Panel.qml"
 	# Restores the saved settings at login for every user (statically wanted).
 	install -d "${pkgdir}/usr/lib/systemd/user/default.target.wants"
 	ln -s ../sp12-autoframe.service "${pkgdir}/usr/lib/systemd/user/default.target.wants/sp12-autoframe.service"
