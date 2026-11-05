@@ -3,9 +3,9 @@
 # releases whose sources are bundled for offline builds (e.g. an ISO install).
 
 pkgname=sp12-modules-dkms
-pkgver=1.15
+pkgver=1.16
 pkgrel=1
-pkgdesc="Surface Pro 12 (Intel): SSAM registry (Flex Keyboard, battery), tablet switch, lid wake, Bluetooth LE OOB pairing, chassis buttons, NFC, cameras incl. IR, battery charge limit, keyboard wake (DKMS)"
+pkgdesc="Surface Pro 12 (Intel): SSAM registry (Flex Keyboard, battery), tablet switch, lid wake, Bluetooth LE OOB pairing, chassis buttons, NFC, cameras incl. IR and the IPU7 PSYS hardware ISP, battery charge limit, keyboard wake (DKMS)"
 arch=('any')
 url="https://github.com/linux-surface/linux-surface/issues/2144"
 license=('GPL-2.0-only')
@@ -17,6 +17,8 @@ build() {
 	cp -r "${startdir}/../../dkms" tree
 	cd tree
 	rm -rf cache src surface bluetooth input nfc media bridge isys power
+	make -C psys -f /dev/null clean 2>/dev/null || true
+	rm -f psys/*.o psys/*.ko psys/*.mod psys/*.mod.c psys/.*.cmd psys/Module.symvers psys/modules.order
 	grep -q "^PACKAGE_VERSION=\"${pkgver}\"" dkms.conf
 	for k in ${SP12_CACHE_KVERS:-}; do
 		./prepare-sources.sh --cache "$k"
@@ -30,6 +32,10 @@ package() {
 	install -Dm755 prepare-sources.sh -t "$d"
 	install -Dm644 patches/*.patch -t "$d/patches"
 	install -Dm644 patches-7.4/*.patch -t "$d/patches-7.4"
+	# IPU7 PSYS driver (Intel's, on the ipu6 core; 7.4+)
+	install -Dm644 psys/Kbuild psys/*.c psys/*.h -t "$d/psys"
+	install -Dm644 psys/abi/*.h -t "$d/psys/abi"
+	install -Dm644 psys/uapi/linux/*.h -t "$d/psys/uapi/linux"
 	if [ -d cache ]; then
 		install -Dm644 cache/*.tar.gz -t "$d/cache"
 	fi

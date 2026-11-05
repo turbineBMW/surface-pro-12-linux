@@ -371,8 +371,13 @@ the HAL's buffers are all page-aligned.
 areas at level 174 with temporal noise 3.8 and spatial 3.5 (SNR ≈ 33 dB);
 soft ISP: level 115, temporal 3.7, spatial 3.9 (≈ 30 dB), and the PSYS
 picture is brighter, sharper and wider (full-width FOV versus the soft
-ISP's centre crop). `private/camera/psys/work/ab-metrics.py`. Low light and
-the LAIQ record question remain; the AIC logs nothing about records.
+ISP's centre crop). `private/camera/psys/work/ab-metrics.py`. The LAIQ
+record swap (0x108/0x104/0x10c from Intel's OV08X40 tuning, Glauser's
+recipe) is **not** a win here: same scene, luma temporal noise 2.79 → 3.58,
+flat level 187 → 139 (the AE record is among them), chroma temporal 4.54 →
+3.94. The Windows records stay. Remaining noise is gain in dim light; the
+lever is the AE exposure/gain plan, later. Relay path at 1080p30: 29.97 fps
+at the loopback, ~1 core of CPU (3A libraries + two copies), RSS 514 MB.
 
 **Stage 6 (2026-11-05), dev relay works:** `userspace/etc/{v4l2-relayd.d,
 systemd,modprobe.d}` + `isp/install-relay-dev.sh`. "Surface Front Camera
