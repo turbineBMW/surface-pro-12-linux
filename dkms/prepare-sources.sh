@@ -103,9 +103,11 @@ done
 mkdir surface
 cp src/drivers/platform/surface/surface_aggregator_registry.c \
    src/drivers/platform/surface/surface_aggregator_tabletsw.c \
-   src/drivers/platform/surface/surface_gpe.c surface/
+   src/drivers/platform/surface/surface_gpe.c \
+   src/drivers/platform/surface/surface_platform_profile.c surface/
 cat > surface/Kbuild <<'KB'
 obj-m += surface_aggregator_registry.o surface_aggregator_tabletsw.o surface_gpe.o
+obj-m += surface_platform_profile.o
 KB
 
 # Build only bluetooth.ko; rfcomm, bnep, hidp and 6lowpan stay stock.
