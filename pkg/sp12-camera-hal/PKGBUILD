@@ -1,0 +1,105 @@
+# Maintainer: surface-pro-12-linux
+#
+# Intel's IPU7 camera HAL, icamerasrc and the IPU7.5 imaging libraries,
+# with the Surface Pro 12 camera configuration (docs/hardware-isp-plan.md).
+# Built from inputs staged by isp/build-package.sh into private/ next to
+# this file: the three upstream checkouts, the converted graph settings and
+# the tuning files. The graphs and tuning come from the Windows driver
+# package, so neither this package nor its inputs are published.
+#
+# Not meant to be built by makepkg directly: run isp/build-package.sh.
+pkgname=sp12-camera-hal
+# The HAL release (ipu7-camera-hal e5172cc, 2025-12-10).
+pkgver=2025.12.10
+pkgrel=1
+pkgdesc="Intel IPU7 camera HAL and icamerasrc with the Surface Pro 12 configuration (hardware ISP)"
+arch=(x86_64)
+url="https://github.com/intel/ipu7-camera-hal"
+license=('Apache-2.0' 'LicenseRef-Intel-ipu7-camera-bins')
+depends=(gcc-libs glibc gstreamer gst-plugins-base-libs jsoncpp expat libdrm
+         v4l2-relayd v4l2loopback-dkms)
+makedepends=(cmake autoconf automake libtool pkgconf python)
+options=(!lto !debug)
+backup=(etc/v4l2-relayd.d/sp12-front.conf etc/v4l2-relayd.d/sp12-rear.conf)
+install=sp12-camera-hal.install
+source=()
+
+prepare() {
+	local p="$startdir/private"
+	[[ -d $p/hal && -d $p/bins && -d $p/icamerasrc ]] ||
+		{ echo "run isp/build-package.sh (stages $p)" >&2; return 1; }
+	rm -rf hal bins icamerasrc
+	cp -a "$p/hal" "$p/bins" "$p/icamerasrc" .
+	cd hal
+	for patch in "$p"/patches/*.patch; do
+		patch -Np1 -s < "$patch"
+	done
+	# The closed libraries, found through pkg-config during the build.
+	sed "s#^prefix=.*#prefix=$srcdir/bins#" "$srcdir/bins/lib/pkgconfig/ia_imaging-ipu75xa.pc" \
+		> "$srcdir/ia_imaging-ipu75xa.pc"
+}
+
+build() {
+	export PKG_CONFIG_PATH=$srcdir
+	cmake -S hal -B build-hal -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+		-DCMAKE_INSTALL_SYSCONFDIR=/usr/share/defaults/etc \
+		-DBUILD_CAMHAL_ADAPTOR=ON -DBUILD_CAMHAL_PLUGIN=ON -DIPU_VERSIONS=ipu75xa \
+		-DUSE_STATIC_GRAPH=ON -DUSE_STATIC_GRAPH_AUTOGEN=ON
+	cmake --build build-hal
+	# icamerasrc builds against the staged HAL install.
+	DESTDIR="$srcdir/stage" cmake --install build-hal
+	sed "s#^prefix=.*#prefix=$srcdir/stage/usr#" "$srcdir/stage/usr/lib/pkgconfig/libcamhal.pc" \
+		> "$srcdir/libcamhal.pc"
+	cd icamerasrc
+	[[ -f configure ]] || autoreconf --force --install --make
+	mkdir -p ../build-icamerasrc
+	cd ../build-icamerasrc
+	CHROME_SLIM_CAMHAL=ON LIBRARY_PATH="$srcdir/bins/lib:$srcdir/stage/usr/lib" \
+		../icamerasrc/configure --prefix=/usr --libdir=/usr/lib
+	make
+}
+
+package() {
+	local p="$startdir/private"
+	DESTDIR="$pkgdir" cmake --install build-hal
+	make -C build-icamerasrc DESTDIR="$pkgdir" install
+	# Development leftovers.
+	rm -rf "$pkgdir"/usr/include
+	find "$pkgdir/usr/lib" \( -name '*.a' -o -name '*.la' \) -delete
+	# The closed libraries (ipu75xa only), with their licence.
+	install -d "$pkgdir/usr/lib"
+	cp -a bins/lib/*ipu75xa*.so* "$pkgdir/usr/lib/"
+	chmod 755 "$pkgdir"/usr/lib/libia_*.so*
+	install -Dm644 bins/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.ipu7-camera-bins"
+	install -Dm644 hal/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.ipu7-camera-hal"
+
+	# Surface Pro 12 configuration, replacing Intel's reference boards.
+	local c="$pkgdir/usr/share/defaults/etc/camera/ipu75xa"
+	rm -rf "$pkgdir/usr/share/defaults/etc/camera/ipu75xa-staging"
+	rm -f "$c"/*.aiqb "$c"/gcss/* "$c"/sensors/*
+	install -m644 "$p"/config/sensors/*.json "$c/sensors/"
+	install -m644 "$p"/graphs/*.IPU75XA.bin "$c/gcss/"
+	install -m644 "$p"/tuning/*.aiqb "$c/"
+	python3 - "$c/libcamhal_configs.json" <<'PY'
+import json, re, sys
+p = sys.argv[1]
+t = re.sub(r'^\s*//.*$', '', open(p).read(), flags=re.M)
+j = json.loads(t)
+# The ipu6 driver names the IPU7.5 entities "Intel IPU7.5 CSI2 N"; the HAL
+# builds that prefix from this field.
+j['Common']['platform'] = 'IPU7.5'
+j['Common']['availableSensors'] = ['imx681-uf-2', 'ov13858-wf-0']
+open(p, 'w').write(json.dumps(j, indent=4) + '\n')
+PY
+
+	# Relay into v4l2loopback (one device per camera), on demand.
+	local u="$p/userspace"
+	for cam in front rear; do
+		install -Dm644 "$u/etc/v4l2-relayd.d/sp12-$cam.conf" "$pkgdir/etc/v4l2-relayd.d/sp12-$cam.conf"
+		install -Dm644 "$u/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf" \
+			"$pkgdir/usr/lib/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf"
+	done
+	install -Dm644 "$u/etc/modprobe.d/sp12-v4l2loopback.conf" \
+		"$pkgdir/usr/lib/modprobe.d/sp12-v4l2loopback.conf"
+}

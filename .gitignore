@@ -17,6 +17,7 @@ pkg/bluez-sp12/bluez/
 pkg/*/*.tar.gz
 pkg/*/build.log
 pkg/out/
+pkg/sp12-camera-hal/private/
 *.pkg.tar.*
 *.iso
 *.efi

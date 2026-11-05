@@ -16,6 +16,8 @@ for cam in front rear; do
 	install -Dm644 "$R/userspace/etc/v4l2-relayd.d/sp12-$cam.conf" /etc/v4l2-relayd.d/sp12-$cam.conf
 	install -Dm644 "$R/userspace/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf" \
 		"/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf"
+	install -Dm644 "$R/isp/relay-dev-prefix.conf" \
+		"/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/zz-dev-prefix.conf"
 done
 rm -f /etc/udev/rules.d/70-sp12-rear-flip.rules
 install -Dm644 "$R/userspace/usr/share/wireplumber/wireplumber.conf.d/50-sp12-isp-cameras.conf" \
