@@ -47,6 +47,7 @@ class Params:
         self.group = True
         self.group_grow_frames = 30  # a new face widens the shot after this many frames
         self.match_iou = 0.3
+        self.extend_aspect = 0.0   # > 0: consumer widens windows to this aspect (ISP path)
         self.__dict__.update(kw)
 
 
@@ -109,8 +110,13 @@ class Controller:
     def _limit(self, cx, cy, w):
         w = min(max(w, self.min_w), self.full_w)
         h = w / self.aspect
-        cx = min(max(cx, w / 2), self.sw - w / 2)
-        cy = min(max(cy, h / 2), self.sh - h / 2)
+        ew, eh = w, h
+        if self.p.extend_aspect > 0:
+            if w / h > self.p.extend_aspect: eh = w / self.p.extend_aspect
+            else: ew = h * self.p.extend_aspect
+        ew, eh = min(ew, self.sw), min(eh, self.sh)
+        cx = min(max(cx, ew / 2), self.sw - ew / 2)
+        cy = min(max(cy, eh / 2), self.sh - eh / 2)
         return cx, cy, w
 
     def step(self, dets, dt):

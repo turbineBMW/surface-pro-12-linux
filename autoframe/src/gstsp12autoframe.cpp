@@ -38,6 +38,11 @@ struct State {
     double t_det = 0, t_crop = 0;
     int n_timed = 0;
     int in_w = 0, in_h = 0, out_w = 0, out_h = 0;
+    /* ISP mode */
+    GstElement *zoom_target = nullptr;      // upstream element with a "zoom-region" property
+    std::vector<sp12::Window> sent;         // windows sent, newest last (for latency mapping)
+    sp12::Window last_sent{0, 0, 0, 0};
+    int array_w = 3844, array_h = 2640;
 };
 
 typedef struct _GstSp12AutoFrame {
@@ -52,6 +57,9 @@ typedef struct _GstSp12AutoFrame {
     gint detect_interval;
     gchar *control_file;
     gboolean draw_boxes;
+    gint mode;                 /* 0 crop (in the element), 1 isp (zoom-region upstream) */
+    gchar *active_array;       /* "WxH" sensor active array, ISP mode */
+    gint isp_latency;          /* frames between a zoom-region update and its effect */
     /* state */
     State *st;
 } GstSp12AutoFrame;
@@ -76,7 +84,23 @@ enum {
     PROP_DETECT_INTERVAL,
     PROP_CONTROL_FILE,
     PROP_DRAW_BOXES,
+    PROP_MODE,
+    PROP_ACTIVE_ARRAY,
+    PROP_ISP_LATENCY,
 };
+
+enum { MODE_CROP = 0, MODE_ISP = 1 };
+
+#define GST_TYPE_SP12_AUTOFRAME_MODE (gst_sp12_autoframe_mode_get_type())
+static GType gst_sp12_autoframe_mode_get_type(void) {
+    static GType t = 0;
+    static const GEnumValue values[] = {
+        {MODE_CROP, "Crop and scale in the element (input larger than output)", "crop"},
+        {MODE_ISP, "Pass through; send the window upstream as zoom-region (ISP crops)", "isp"},
+        {0, NULL, NULL}};
+    if (!t) t = g_enum_register_static("GstSp12AutoFrameMode", values);
+    return t;
+}
 
 #define CAPS_STR GST_VIDEO_CAPS_MAKE("NV12")
 static GstStaticPadTemplate sink_template =
@@ -122,6 +146,18 @@ static void gst_sp12_autoframe_set_property(GObject *object, guint prop_id, cons
         self->st->ctl_mtime = 0;
         break;
     case PROP_DRAW_BOXES: self->draw_boxes = g_value_get_boolean(value); break;
+    case PROP_MODE: self->mode = g_value_get_enum(value); break;
+    case PROP_ACTIVE_ARRAY: {
+        g_free(self->active_array);
+        self->active_array = g_value_dup_string(value);
+        int w = 0, h = 0;
+        if (self->active_array && sscanf(self->active_array, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+            self->st->array_w = w;
+            self->st->array_h = h;
+        }
+        break;
+    }
+    case PROP_ISP_LATENCY: self->isp_latency = g_value_get_int(value); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec); break;
     }
     apply_params(self);
@@ -147,6 +183,9 @@ static void gst_sp12_autoframe_get_property(GObject *object, guint prop_id, GVal
     case PROP_DETECT_INTERVAL: g_value_set_int(value, self->detect_interval); break;
     case PROP_CONTROL_FILE: g_value_set_string(value, self->control_file); break;
     case PROP_DRAW_BOXES: g_value_set_boolean(value, self->draw_boxes); break;
+    case PROP_MODE: g_value_set_enum(value, self->mode); break;
+    case PROP_ACTIVE_ARRAY: g_value_set_string(value, self->active_array); break;
+    case PROP_ISP_LATENCY: g_value_set_int(value, self->isp_latency); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec); break;
     }
     GST_OBJECT_UNLOCK(self);
@@ -154,7 +193,9 @@ static void gst_sp12_autoframe_get_property(GObject *object, guint prop_id, GVal
 
 static void gst_sp12_autoframe_finalize(GObject *object) {
     GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(object);
+    if (self->st->zoom_target) gst_object_unref(self->st->zoom_target);
     delete self->st;
+    g_free(self->active_array);
     g_free(self->device);
     g_free(self->model);
     g_free(self->control_file);
@@ -202,6 +243,30 @@ static GstCaps *gst_sp12_autoframe_fixate_caps(GstBaseTransform *trans, GstPadDi
     return gst_caps_fixate(othercaps);
 }
 
+/* Walk upstream from our sink pad to the first element with a "zoom-region"
+ * property (icamerasrc with the sp12 patch), through capsfilters and queues. */
+static void find_zoom_target(GstSp12AutoFrame *self) {
+    GstPad *pad = GST_PAD(gst_object_ref(GST_BASE_TRANSFORM_SINK_PAD(self)));
+    for (int hop = 0; hop < 8 && pad; hop++) {
+        GstPad *peer = gst_pad_get_peer(pad);
+        gst_object_unref(pad);
+        pad = nullptr;
+        if (!peer) break;
+        GstElement *el = gst_pad_get_parent_element(peer);
+        gst_object_unref(peer);
+        if (!el) break;
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(el), "zoom-region")) {
+            self->st->zoom_target = el;  // keep the ref
+            GST_INFO_OBJECT(self, "zoom target: %s", GST_ELEMENT_NAME(el));
+            return;
+        }
+        pad = gst_element_get_static_pad(el, "sink");
+        gst_object_unref(el);
+    }
+    if (pad) gst_object_unref(pad);
+    GST_WARNING_OBJECT(self, "no upstream element with a zoom-region property; ISP mode will not move the window");
+}
+
 static gboolean gst_sp12_autoframe_set_info(GstVideoFilter *filter, GstCaps *incaps, GstVideoInfo *in_info,
                                             GstCaps *outcaps, GstVideoInfo *out_info) {
     GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(filter);
@@ -213,13 +278,25 @@ static gboolean gst_sp12_autoframe_set_info(GstVideoFilter *filter, GstCaps *inc
     st->out_w = GST_VIDEO_INFO_WIDTH(out_info);
     st->out_h = GST_VIDEO_INFO_HEIGHT(out_info);
     GST_OBJECT_LOCK(self);
-    st->ctl.reset(st->in_w, st->in_h, (float)st->out_w / st->out_h);
+    const bool isp = self->mode == MODE_ISP;
+    if (isp) {
+        st->ctl.p.extend_aspect = (float)st->array_w / st->array_h;
+        st->ctl.reset(st->array_w, st->array_h, (float)st->out_w / st->out_h);
+    } else {
+        st->ctl.p.extend_aspect = 0;
+        st->ctl.reset(st->in_w, st->in_h, (float)st->out_w / st->out_h);
+    }
     apply_params(self);
     GST_OBJECT_UNLOCK(self);
     st->dets.clear();
+    st->sent.clear();
+    st->last_sent = {0, 0, 0, 0};
     st->last_pts = GST_CLOCK_TIME_NONE;
-    GST_INFO_OBJECT(self, "in %dx%d -> out %dx%d, full window %.0f px wide, max zoom %.2f", st->in_w,
-                    st->in_h, st->out_w, st->out_h, st->ctl.current().w, self->max_zoom);
+    if (isp && !st->zoom_target) find_zoom_target(self);
+    GST_INFO_OBJECT(self, "%s mode: in %dx%d -> out %dx%d, window space %dx%d, full window %.0f px wide, max zoom %.2f%s",
+                    isp ? "isp" : "crop", st->in_w, st->in_h, st->out_w, st->out_h, isp ? st->array_w : st->in_w,
+                    isp ? st->array_h : st->in_h, st->ctl.current().w, self->max_zoom,
+                    isp ? (st->zoom_target ? ", zoom target found" : ", NO zoom target upstream") : "");
     return TRUE;
 }
 
@@ -308,15 +385,37 @@ static void poll_control_file(GstSp12AutoFrame *self) {
     g_free(path);
 }
 
-static GstFlowReturn gst_sp12_autoframe_transform_frame(GstVideoFilter *filter, GstVideoFrame *in,
-                                                        GstVideoFrame *out) {
-    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(filter);
+/* Detection on the frame (any size): detections in frame pixels. */
+static void run_detector(GstSp12AutoFrame *self, const cv::Mat &y_in, const cv::Mat &uv_in) {
     State *st = self->st;
-    const int iw = st->in_w, ih = st->in_h, ow = st->out_w, oh = st->out_h;
+    const int iw = y_in.cols, ih = y_in.rows;
+    const int dw = st->det->width(), dh = st->det->height();
+    int tw = dw, th = std::min(dh, (int)std::lround((double)ih * dw / iw)) & ~1;
+    if (th < 2) th = 2;
+    if (st->nv12small.empty()) {
+        st->nv12small.create(dh * 3 / 2, dw, CV_8UC1);
+        st->nv12small(cv::Rect(0, 0, dw, dh)).setTo(0);
+        st->nv12small(cv::Rect(0, dh, dw, dh / 2)).setTo(128);
+    }
+    cv::Mat ydst = st->nv12small(cv::Rect(0, 0, tw, th));
+    cv::resize(y_in, ydst, ydst.size(), 0, 0, cv::INTER_AREA);
+    cv::resize(uv_in, st->uvsmall, cv::Size(tw / 2, th / 2), 0, 0, cv::INTER_AREA);
+    st->uvsmall.reshape(1, th / 2).copyTo(st->nv12small(cv::Rect(0, dh, tw, th / 2)));
+    cv::cvtColor(st->nv12small, st->bgr, cv::COLOR_YUV2BGR_NV12);
+    st->dets = st->det->infer(st->bgr);
+    const float sx = (float)iw / tw, sy = (float)ih / th;
+    for (auto &d : st->dets) {
+        d.x *= sx; d.w *= sx; d.y *= sy; d.h *= sy;
+    }
+}
 
+/* Common per-frame work: control file, dt, detection, controller. Returns the
+ * window in the controller's space (input pixels in crop mode, the sensor
+ * active array in ISP mode). */
+static sp12::Window frame_step(GstSp12AutoFrame *self, GstVideoFrame *in, gint64 *t_det_us) {
+    State *st = self->st;
     if (st->frame_no % 30 == 0) poll_control_file(self);
 
-    /* frame interval from timestamps, 1/30 s when unknown */
     float dt = 1.f / 30;
     GstClockTime pts = GST_BUFFER_PTS(in->buffer);
     if (GST_CLOCK_TIME_IS_VALID(pts) && GST_CLOCK_TIME_IS_VALID(st->last_pts) && pts > st->last_pts) {
@@ -325,55 +424,140 @@ static GstFlowReturn gst_sp12_autoframe_transform_frame(GstVideoFilter *filter, 
     }
     st->last_pts = pts;
 
+    GST_OBJECT_LOCK(self);
+    gboolean enabled = self->enable;
+    int interval = self->detect_interval > 0 ? self->detect_interval : 1;
+    const bool isp = self->mode == MODE_ISP;
+    const int latency = self->isp_latency;
+    GST_OBJECT_UNLOCK(self);
+
+    const int iw = GST_VIDEO_FRAME_WIDTH(in), ih = GST_VIDEO_FRAME_HEIGHT(in);
     cv::Mat y_in(ih, iw, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(in, 0), GST_VIDEO_FRAME_PLANE_STRIDE(in, 0));
     cv::Mat uv_in(ih / 2, iw / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(in, 1), GST_VIDEO_FRAME_PLANE_STRIDE(in, 1));
 
-    GST_OBJECT_LOCK(self);
-    gboolean enabled = self->enable, draw = self->draw_boxes;
-    int interval = self->detect_interval > 0 ? self->detect_interval : 1;
-    GST_OBJECT_UNLOCK(self);
-
-    /* 1. detect (every `interval` frames; the controller holds the last result) */
     gint64 t0 = g_get_monotonic_time();
     if (enabled && st->det && st->frame_no % interval == 0) {
-        /* Letterbox: scale to the detector width keeping the aspect (an
-         * integer ratio for 4K and 1080p, which is OpenCV's fast INTER_AREA
-         * path), pad the rest. 3840x2160 -> 320x180 in a 320x192 input. */
-        const int dw = st->det->width(), dh = st->det->height();
-        int tw = dw, th = std::min(dh, (int)std::lround((double)ih * dw / iw)) & ~1;
-        if (th < 2) th = 2;
-        if (st->nv12small.empty()) {
-            st->nv12small.create(dh * 3 / 2, dw, CV_8UC1);
-            st->nv12small(cv::Rect(0, 0, dw, dh)).setTo(0);
-            st->nv12small(cv::Rect(0, dh, dw, dh / 2)).setTo(128);
-        }
-        cv::Mat ydst = st->nv12small(cv::Rect(0, 0, tw, th));
-        cv::resize(y_in, ydst, ydst.size(), 0, 0, cv::INTER_AREA);
-        cv::resize(uv_in, st->uvsmall, cv::Size(tw / 2, th / 2), 0, 0, cv::INTER_AREA);
-        st->uvsmall.reshape(1, th / 2).copyTo(st->nv12small(cv::Rect(0, dh, tw, th / 2)));
-        cv::cvtColor(st->nv12small, st->bgr, cv::COLOR_YUV2BGR_NV12);
-        st->dets = st->det->infer(st->bgr);
-        const float sx = (float)iw / tw, sy = (float)ih / th;
-        for (auto &d : st->dets) {
-            d.x *= sx; d.w *= sx; d.y *= sy; d.h *= sy;
+        run_detector(self, y_in, uv_in);
+        if (isp) {
+            /* The frame shows the window sent `latency` frames ago; map the
+             * detections through it into active-array coordinates. */
+            sp12::Window w = st->ctl.current();
+            if (!st->sent.empty()) {
+                size_t idx = st->sent.size() > (size_t)latency ? st->sent.size() - 1 - latency : 0;
+                w = st->sent[idx];
+            }
+            const float sx = w.w / iw, sy = w.h / ih;
+            for (auto &d : st->dets) {
+                d.x = w.x + d.x * sx; d.w *= sx; d.y = w.y + d.y * sy; d.h *= sy;
+            }
         }
     }
-    gint64 t1 = g_get_monotonic_time();
+    *t_det_us = g_get_monotonic_time() - t0;
 
-    /* 2. decide the window */
     GST_OBJECT_LOCK(self);
     sp12::Window win = st->ctl.step(st->dets, dt);
     GST_OBJECT_UNLOCK(self);
-    int x = ((int)std::lround(win.x)) & ~1, y = ((int)std::lround(win.y)) & ~1;
-    int w = ((int)std::lround(win.w)) & ~1, h = ((int)std::lround(win.h)) & ~1;
+    return win;
+}
+
+static void round_window(sp12::Window &win, int max_w, int max_h, int &x, int &y, int &w, int &h) {
+    x = ((int)std::lround(win.x)) & ~1; y = ((int)std::lround(win.y)) & ~1;
+    w = ((int)std::lround(win.w)) & ~1; h = ((int)std::lround(win.h)) & ~1;
     if (w < 2) w = 2;
     if (h < 2) h = 2;
-    if (x + w > iw) x = iw - w;
-    if (y + h > ih) y = ih - h;
+    if (x + w > max_w) x = max_w - w;
+    if (y + h > max_h) y = max_h - h;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
+}
 
-    /* 3. crop + scale */
+static void draw_dets(GstSp12AutoFrame *self, cv::Mat &y_out, float ox, float oy, float sx, float sy) {
+    for (const auto &d : self->st->dets)
+        cv::rectangle(y_out, cv::Rect((int)((d.x - ox) * sx), (int)((d.y - oy) * sy), (int)(d.w * sx), (int)(d.h * sy)),
+                      cv::Scalar(235), 2);
+}
+
+static void log_timing(GstSp12AutoFrame *self, gint64 det_us, gint64 crop_us, int x, int y, int w, int h, float full_w) {
+    State *st = self->st;
+    st->t_det += det_us / 1000.0;
+    st->t_crop += crop_us / 1000.0;
+    if (++st->n_timed == 300) {
+        GST_DEBUG_OBJECT(self, "avg per frame: detect %.2f ms, crop+scale %.2f ms; window %d,%d %dx%d zoom %.2f, %zu face(s)",
+                         st->t_det / 300, st->t_crop / 300, x, y, w, h, w > 0 ? full_w / w : 0.f, st->dets.size());
+        st->t_det = st->t_crop = 0;
+        st->n_timed = 0;
+    }
+    st->frame_no++;
+}
+
+/* ISP mode (and crop mode with equal sizes): the frame passes through. */
+static GstFlowReturn gst_sp12_autoframe_transform_frame_ip(GstVideoFilter *filter, GstVideoFrame *frame) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(filter);
+    State *st = self->st;
+    gint64 det_us = 0;
+    sp12::Window win = frame_step(self, frame, &det_us);
+    gint64 t1 = g_get_monotonic_time();
+    const int fw = GST_VIDEO_FRAME_WIDTH(frame), fh = GST_VIDEO_FRAME_HEIGHT(frame);
+    int x, y, w, h;
+    GST_OBJECT_LOCK(self);
+    const bool isp = self->mode == MODE_ISP;
+    gboolean draw = self->draw_boxes;
+    GST_OBJECT_UNLOCK(self);
+    if (isp) {
+        round_window(win, st->array_w, st->array_h, x, y, w, h);
+        sp12::Window sent{(float)x, (float)y, (float)w, (float)h};
+        if (std::fabs(sent.x - st->last_sent.x) >= 2 || std::fabs(sent.y - st->last_sent.y) >= 2 ||
+            std::fabs(sent.w - st->last_sent.w) >= 2) {
+            if (st->zoom_target) {
+                char buf[64];
+                /* the full view is the whole active array, not 0,0,0,0 (which the HAL ignores) */
+                if (w >= st->array_w - 2) g_snprintf(buf, sizeof buf, "0,0,%d,%d", st->array_w, st->array_h);
+                else g_snprintf(buf, sizeof buf, "%d,%d,%d,%d", x, y, x + w, y + h);
+                g_object_set(st->zoom_target, "zoom-region", buf, NULL);
+            }
+            st->last_sent = sent;
+        }
+        st->sent.push_back(sent);
+        if (st->sent.size() > 64) st->sent.erase(st->sent.begin(), st->sent.begin() + 32);
+        if (draw) {
+            cv::Mat y_out(fh, fw, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(frame, 0), GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0));
+            draw_dets(self, y_out, sent.x, sent.y, (float)fw / sent.w, (float)fh / sent.h);
+        }
+    } else {
+        /* crop mode with in == out: crop and scale through a copy */
+        round_window(win, fw, fh, x, y, w, h);
+        cv::Mat y_io(fh, fw, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(frame, 0), GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0));
+        cv::Mat uv_io(fh / 2, fw / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(frame, 1), GST_VIDEO_FRAME_PLANE_STRIDE(frame, 1));
+        if (w != fw || h != fh) {
+            cv::Mat yc, uvc;
+            cv::resize(y_io(cv::Rect(x, y, w, h)), yc, y_io.size(), 0, 0, cv::INTER_LINEAR);
+            cv::resize(uv_io(cv::Rect(x / 2, y / 2, w / 2, h / 2)), uvc, uv_io.size(), 0, 0, cv::INTER_LINEAR);
+            yc.copyTo(y_io);
+            uvc.copyTo(uv_io);
+        }
+        if (draw) draw_dets(self, y_io, x, y, (float)fw / w, (float)fh / h);
+    }
+    log_timing(self, det_us, g_get_monotonic_time() - t1, x, y, w, h, st->ctl.current().w > 0 ? (isp ? std::min(st->array_w, (int)(st->array_h * (float)fw / fh)) : std::min(fw, (int)(fh * (float)fw / fh))) : 0);
+    return GST_FLOW_OK;
+}
+
+/* Crop mode with different sizes: crop and scale from in to out. */
+static GstFlowReturn gst_sp12_autoframe_transform_frame(GstVideoFilter *filter, GstVideoFrame *in,
+                                                        GstVideoFrame *out) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(filter);
+    State *st = self->st;
+    const int iw = st->in_w, ih = st->in_h, ow = st->out_w, oh = st->out_h;
+    gint64 det_us = 0;
+    sp12::Window win = frame_step(self, in, &det_us);
+    gint64 t1 = g_get_monotonic_time();
+    GST_OBJECT_LOCK(self);
+    gboolean draw = self->draw_boxes;
+    GST_OBJECT_UNLOCK(self);
+    int x, y, w, h;
+    round_window(win, iw, ih, x, y, w, h);
+
+    cv::Mat y_in(ih, iw, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(in, 0), GST_VIDEO_FRAME_PLANE_STRIDE(in, 0));
+    cv::Mat uv_in(ih / 2, iw / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(in, 1), GST_VIDEO_FRAME_PLANE_STRIDE(in, 1));
     cv::Mat y_out(oh, ow, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(out, 0), GST_VIDEO_FRAME_PLANE_STRIDE(out, 0));
     cv::Mat uv_out(oh / 2, ow / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(out, 1), GST_VIDEO_FRAME_PLANE_STRIDE(out, 1));
     if (w == ow && h == oh) {
@@ -386,25 +570,8 @@ static GstFlowReturn gst_sp12_autoframe_transform_frame(GstVideoFilter *filter, 
         cv::resize(y_in(cv::Rect(x, y, w, h)), y_out, y_out.size(), 0, 0, interp);
         cv::resize(uv_in(cv::Rect(x / 2, y / 2, w / 2, h / 2)), uv_out, uv_out.size(), 0, 0, interp);
     }
-    gint64 t2 = g_get_monotonic_time();
-
-    if (draw) {
-        const float sx = (float)ow / w, sy = (float)oh / h;
-        for (const auto &d : st->dets)
-            cv::rectangle(y_out, cv::Rect((int)((d.x - x) * sx), (int)((d.y - y) * sy), (int)(d.w * sx), (int)(d.h * sy)),
-                          cv::Scalar(235), 2);
-    }
-
-    st->t_det += (t1 - t0) / 1000.0;
-    st->t_crop += (t2 - t1) / 1000.0;
-    if (++st->n_timed == 300) {
-        GST_DEBUG_OBJECT(self, "avg per frame: detect %.2f ms, crop+scale %.2f ms; window %d,%d %dx%d zoom %.2f, %zu face(s)",
-                         st->t_det / 300, st->t_crop / 300, x, y, w, h, st->ctl.current().w > 0 ? (float)std::min(iw, (int)(ih * (float)ow / oh)) / w : 0.f,
-                         st->dets.size());
-        st->t_det = st->t_crop = 0;
-        st->n_timed = 0;
-    }
-    st->frame_no++;
+    if (draw) draw_dets(self, y_out, x, y, (float)ow / w, (float)oh / h);
+    log_timing(self, det_us, g_get_monotonic_time() - t1, x, y, w, h, std::min(iw, (int)(ih * (float)ow / oh)));
     return GST_FLOW_OK;
 }
 
@@ -447,6 +614,12 @@ static void gst_sp12_autoframe_class_init(GstSp12AutoFrameClass *klass) {
         g_param_spec_string("control-file", "Control file", "File with mode=auto|off (and max-zoom=, face-frac=, headroom=, speed=, hold-time=, draw-boxes=), re-read on change", NULL, flags));
     g_object_class_install_property(gobject_class, PROP_DRAW_BOXES,
         g_param_spec_boolean("draw-boxes", "Draw boxes", "Draw detections on the output (debug)", FALSE, flags));
+    g_object_class_install_property(gobject_class, PROP_MODE,
+        g_param_spec_enum("mode", "Mode", "Where the crop happens", GST_TYPE_SP12_AUTOFRAME_MODE, MODE_CROP, flags));
+    g_object_class_install_property(gobject_class, PROP_ACTIVE_ARRAY,
+        g_param_spec_string("active-array", "Active array", "Sensor active array WxH, the zoom-region coordinate space (ISP mode)", "3844x2640", flags));
+    g_object_class_install_property(gobject_class, PROP_ISP_LATENCY,
+        g_param_spec_int("isp-latency", "ISP latency", "Frames between sending a zoom-region and seeing it in the output (ISP mode)", 0, 30, 2, flags));
 
     gst_element_class_set_static_metadata(element_class, "Surface Pro 12 automatic framing", "Filter/Effect/Video",
         "Crops and scales NV12 video to follow faces (YuNet on the NPU through OpenVINO)",
@@ -460,6 +633,7 @@ static void gst_sp12_autoframe_class_init(GstSp12AutoFrameClass *klass) {
     trans_class->stop = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_stop);
     filter_class->set_info = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_set_info);
     filter_class->transform_frame = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_transform_frame);
+    filter_class->transform_frame_ip = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_transform_frame_ip);
 }
 
 static void gst_sp12_autoframe_init(GstSp12AutoFrame *self) {
@@ -477,10 +651,13 @@ static void gst_sp12_autoframe_init(GstSp12AutoFrame *self) {
     self->detect_interval = 2;
     self->control_file = NULL;
     self->draw_boxes = FALSE;
+    self->mode = MODE_CROP;
+    self->active_array = g_strdup("3844x2640");
+    self->isp_latency = 2;
     self->st = new State();
     apply_params(self);
     gst_base_transform_set_passthrough(GST_BASE_TRANSFORM(self), FALSE);
-    gst_base_transform_set_in_place(GST_BASE_TRANSFORM(self), FALSE);
+    gst_base_transform_set_in_place(GST_BASE_TRANSFORM(self), TRUE);
 }
 
 static gboolean plugin_init(GstPlugin *plugin) {
