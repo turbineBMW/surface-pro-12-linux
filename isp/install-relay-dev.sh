@@ -17,11 +17,7 @@ for cam in front rear; do
 	install -Dm644 "$R/userspace/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf" \
 		"/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf"
 done
-install -Dm644 "$R/userspace/usr/lib/udev/rules.d/70-sp12-rear-flip.rules" /etc/udev/rules.d/70-sp12-rear-flip.rules
-udevadm control --reload
-for sd in /sys/class/video4linux/v4l-subdev*; do
-	grep -q "^ov13858 " $sd/name 2>/dev/null && v4l2-ctl -d /dev/$(basename $sd) --set-ctrl horizontal_flip=1,vertical_flip=1
-done
+rm -f /etc/udev/rules.d/70-sp12-rear-flip.rules
 
 # (Re)load the loopback module so the card label matches the config.
 if lsmod | grep -q '^v4l2loopback' && ! grep -qx "Surface Rear Camera ISP" /sys/devices/virtual/video4linux/*/name 2>/dev/null; then

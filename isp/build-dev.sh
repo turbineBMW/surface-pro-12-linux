@@ -28,7 +28,7 @@ sed "s#^prefix=.*#prefix=$PREFIX#" "$W/bins/lib/pkgconfig/ia_imaging-ipu75xa.pc"
 	> "$PREFIX/lib/pkgconfig/ia_imaging-ipu75xa.pc"
 
 # HAL: AIC input timestamp (Marco Glauser), Arch jsoncpp include path (AUR).
-for p in hal-aic-timestamp.patch hal-arch-jsoncpp.patch; do
+for p in hal-aic-timestamp.patch hal-arch-jsoncpp.patch hal-sensor-orientation.patch; do
 	patch -d "$W/hal" -p1 --forward --batch -s < "$HERE/patches/$p" || true
 done
 cmake -S "$W/hal" -B "$W/build/hal" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \

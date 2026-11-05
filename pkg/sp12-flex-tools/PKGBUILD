@@ -49,8 +49,6 @@ package() {
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-ir-camera.rules"
 	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-psys.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-psys.rules"
-	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-rear-flip.rules" \
-		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-rear-flip.rules"
 	install -Dm755 "$u/usr/lib/sp12/sp12-als" "${pkgdir}/usr/lib/sp12/sp12-als"
 	install -Dm644 "$u/usr/lib/systemd/system/sp12-als.service" \
 		"${pkgdir}/usr/lib/systemd/system/sp12-als.service"

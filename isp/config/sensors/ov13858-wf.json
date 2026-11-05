@@ -104,8 +104,6 @@
             "sensor.info.pixelArraySize": [4076, 2806],
             // 0:RGGB, 1:GRBG, 2:GBRG, 3:BGGR, 4:RGB
             "sensor.info.colorFilterArrangement": [1],
-            // mounted upside down; the HAL sets HFLIP/VFLIP on the sensor
-            "sensor.orientation": [180],
             // raw, yuv, jpeg
             "request.maxNumOutputStreams": [ 1, 3, 1 ],
             // 0: No input, 1: 1 input stream (YUV or RAW), 2: 2 input streams (YUV and RAW)
@@ -179,6 +177,9 @@
         // ascending order request
         "supportedISysSizes": [[4076, 2806]],
         "supportedISysFormat": ["V4L2_PIX_FMT_SGRBG10"],
+        // mounted upside down: the HAL sets HFLIP/VFLIP on the sensor at stream
+        // start (patches/hal-sensor-orientation.patch reads this key)
+        "sensorOrientation": 180,
         "enableAIQ": true,
         "iSysRawFormat": "V4L2_PIX_FMT_SGRBG10",
         "maxRawDataNum": 32,
