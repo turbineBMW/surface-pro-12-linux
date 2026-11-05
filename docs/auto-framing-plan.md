@@ -202,9 +202,36 @@ Findings that replaced the original plan for this stage:
 
 Measured with the packaged stack (sp12-autoframe 0.3, HAL pkgrel 4), 300
 live frames: relay **17 %** of a core (crop mode was 25 %, the plain 1080p
-relay 13 %), detector 0.7 ms per frame on the NPU, crop 0 ms. Still to
-measure: the HAL's apply latency (`isp-latency`, default 2 frames) and the
-AIC recompute cost while the window moves.
+relay 13 %), detector 0.7 ms per frame on the NPU, crop 0 ms. Tracking
+judged good by the user.
+
+**Noise, 2026-11-05 afternoon.** The user saw the noise go back to
+pre-hardware-ISP levels in ISP mode. Measured with
+`autoframe/tools/noise-by-size.py` and `zoom-noise-test.py` (mean absolute
+luma difference between consecutive frames over a band of wall, as root):
+
+| ISP output | temporal noise, dim room | bright room |
+|---|---|---|
+| 3840×2160, 1:1 | 0.41 | 0.89 |
+| 1920×1080, full view (2× downscale) | 4.25 | 2.0–2.2 |
+| 2560×1440 | 4.31 | – |
+| 1920×1080, 2× PTZ zoom | 9.3 | – |
+
+Zoom-region updates do not add noise (nudged every frame: 9.6 vs 9.3 still).
+The ISP's temporal noise reduction is fully effective only in the 4K
+configuration, where the LBFF node outputs full resolution; in the 1080p and
+1440p configurations the LBFF downscales first (`b2i_ds_1_1`) and the whole
+BBPS, TNR included, runs at the output size with the same kernels and links,
+yet the temporal filtering barely acts. Ruled out: the Linux link-mode
+rewrite (`--windows-links` graph: 4.68), repeated frames at 4K (no
+near-identical pairs), the HAL's NR strength (`nr-strength` -120/20 through
+a new icamerasrc property: no change), stream usage (inconclusive, lighting
+changed). A 4K main + 1080p second stream stalls the ISYS (poll timeouts).
+The cause is inside the closed AIC/tuning (TNR parameters for the downscaled
+configurations), unresolved.
+
+Decision: package 0.4 defaults the relay to **crop mode** (4K, CPU crop,
+25 %) for picture quality; ISP mode stays in the relay file, commented out.
 
 ## 6. Risks and open questions
 
