@@ -3,8 +3,8 @@
 # element): follow the face(s) like Windows Studio Effects, or show the whole
 # field of view.
 #
-#   sp12-autoframe [auto|off|toggle|status] [--face F] [--zoom N] [--headroom H]
-#                  [--speed S] [--hold T] [--boxes on|off]
+#   sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N]
+#                  [--headroom H] [--speed S] [--hold T] [--boxes on|off]
 #
 #   --face F      face height as a fraction of the frame: 0.30 default
 #                 (head and shoulders), 0.40 tight, 0.22 loose
@@ -14,11 +14,14 @@
 #   --hold T      seconds to hold the shot after you leave (3)
 #
 # Writes /run/sp12/autoframe, which the relay re-reads within a second, so the
-# change applies to the running camera. Options not given keep their current
-# value from the file; the file is not persisted across boots yet.
+# change applies to the running camera, and saves the same settings to
+# $XDG_CONFIG_HOME/sp12/autoframe.conf. `restore` writes the saved settings
+# back to /run (sp12-autoframe.service does it at login). Options not given
+# keep their current value.
 set -euo pipefail
 
 ctl=/run/sp12/autoframe
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/sp12/autoframe.conf"
 
 current() {
 	local v
@@ -30,7 +33,15 @@ current() {
 declare -A kv
 while IFS='=' read -r k v; do [[ -n $k && $k != mode ]] && kv[$k]=$v; done < <(grep '=' "$ctl" 2>/dev/null || true)
 
-usage() { echo "usage: sp12-autoframe [auto|off|toggle|status] [--face F] [--zoom N] [--headroom H] [--speed S] [--hold T] [--boxes on|off]" >&2; exit 2; }
+usage() { echo "usage: sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N] [--headroom H] [--speed S] [--hold T] [--boxes on|off]" >&2; exit 2; }
+
+if [[ ${1:-} == restore ]]; then
+	[[ -f $conf ]] || exit 0
+	[[ -d $(dirname "$ctl") ]] || { echo "sp12-autoframe: $(dirname "$ctl") missing (is the ISP relay installed?)" >&2; exit 1; }
+	cp -f "$conf" "$ctl.tmp.$$" && mv -f "$ctl.tmp.$$" "$ctl"
+	sed -n 's/^mode=//p' "$ctl"
+	exit 0
+fi
 num() { [[ $1 =~ ^-?[0-9]*\.?[0-9]+$ ]] || usage; echo "$1"; }
 
 want=""
@@ -61,4 +72,5 @@ done
 	for k in "${!kv[@]}"; do echo "$k=${kv[$k]}"; done | sort
 } >"$ctl.tmp.$$"
 mv -f "$ctl.tmp.$$" "$ctl"
+mkdir -p "$(dirname "$conf")" && cp -f "$ctl" "$conf"
 echo "$want"

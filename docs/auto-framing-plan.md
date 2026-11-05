@@ -134,8 +134,14 @@ Each stage ends in a go/no-go. Stages 1–2 need the user in front of the camera
   from the 4K wide field, the Windows look.
 
 ### Stage 2: polish and controls
-- Toggle (done: control file + `sp12-autoframe`); Omarchy tray/plugin item ("Framing: auto / off"),
-  persisted setting; `off` must be bit-identical to today's output.
+- Done 2026-11-05: control file + `sp12-autoframe` (mode, face fraction,
+  zoom cap, headroom, speed, hold), settings saved per user and restored at
+  login by a user unit; package `sp12-autoframe` 0.1 (plugin, model from
+  OpenCV Zoo at a pinned commit, relay environment file + unit drop-in,
+  tmpfiles) installed in place of the dev install.
+- Omarchy tray/plugin item ("Framing: auto / off").
+- `off` is the full field of view scaled from 4K, not bit-identical to the
+  former 1080p relay output (the ISP scales 3844→3840 differently); fine.
 - GL crop/scale through DMABuf if the CPU path shows in power numbers.
 - Detector cadence (every 2nd frame) and the 640×360 display pin as an
   alternative detector input if the downscale is the expensive part.

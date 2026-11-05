@@ -1,0 +1,25 @@
+_relay=v4l2-relayd@sp12-front.service
+
+post_install() {
+	systemd-tmpfiles --create sp12-autoframe.conf
+	systemctl daemon-reload
+	systemctl try-restart "$_relay" 2>/dev/null || true
+	cat <<'EOF'
+sp12-autoframe: the "Surface Front Camera (ISP)" now follows your face.
+  sp12-autoframe off | auto        switch, applies to the running camera
+  sp12-autoframe --face 0.40       tighter (0.30 default, 0.22 loose)
+  sp12-autoframe status            mode and settings in force
+Settings are saved per user and restored at login (sp12-autoframe.service).
+EOF
+}
+
+post_upgrade() {
+	systemd-tmpfiles --create sp12-autoframe.conf
+	systemctl daemon-reload
+	systemctl try-restart "$_relay" 2>/dev/null || true
+}
+
+post_remove() {
+	systemctl daemon-reload
+	systemctl try-restart "$_relay" 2>/dev/null || true
+}

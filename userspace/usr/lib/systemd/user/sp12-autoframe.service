@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore the Surface Pro 12 front camera's automatic framing settings
+Documentation=man:sp12-autoframe
+ConditionPathExists=%E/sp12/autoframe.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sp12-autoframe restore
+
+[Install]
+WantedBy=default.target

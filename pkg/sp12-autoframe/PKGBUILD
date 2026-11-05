@@ -1,0 +1,50 @@
+# Maintainer: surface-pro-12-linux
+#
+# Automatic framing for the Surface Pro 12 (Intel) front camera: a GStreamer
+# element in the hardware-ISP relay that follows the face(s) with a YuNet
+# detector on the NPU (OpenVINO), like Windows Studio Effects. Sources:
+# ../../autoframe and ../../userspace; the model comes from OpenCV Zoo.
+
+pkgname=sp12-autoframe
+pkgver=0.1
+pkgrel=1
+pkgdesc="Surface Pro 12 (Intel): automatic framing (face-following crop) for the front camera through the ISP relay"
+arch=('x86_64')
+url="https://github.com/turbineBMW/surface-pro-12-linux"
+license=('MIT' 'Apache-2.0')
+depends=('gstreamer' 'gst-plugins-base-libs' 'openvino' 'openvino-intel-npu-plugin' 'opencv'
+         'sp12-camera-hal' 'v4l2-relayd' 'intel-npu-driver')
+optdepends=('openvino-intel-gpu-plugin: GPU fallback for the face detector')
+makedepends=('meson' 'ninja' 'pkgconf')
+backup=('etc/v4l2-relayd.d/sp12-front-autoframe.conf')
+install=sp12-autoframe.install
+options=('!debug')
+# YuNet (Apache-2.0), pinned to an OpenCV Zoo commit.
+_zoo=48b10fa505aeb51fbd127fc60a5c660040e823b7
+source=("face_detection_yunet_2023mar-${_zoo:0:7}.onnx::https://github.com/opencv/opencv_zoo/raw/$_zoo/models/face_detection_yunet/face_detection_yunet_2023mar.onnx")
+sha256sums=('8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4')
+
+build() {
+	arch-meson "$startdir/../../autoframe" build
+	meson compile -C build
+}
+
+package() {
+	local u="${startdir}/../../userspace"
+	DESTDIR="$pkgdir" meson install -C build
+	install -Dm644 "${startdir}/../../LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+	install -Dm644 "${srcdir}/face_detection_yunet_2023mar-${_zoo:0:7}.onnx" \
+		"${pkgdir}/usr/share/sp12/face_detection_yunet_2023mar.onnx"
+	install -Dm755 "$u/usr/local/bin/sp12-autoframe" "${pkgdir}/usr/bin/sp12-autoframe"
+	install -Dm644 "$u/etc/v4l2-relayd.d/sp12-front-autoframe.conf" \
+		"${pkgdir}/etc/v4l2-relayd.d/sp12-front-autoframe.conf"
+	install -Dm644 "$u/usr/lib/systemd/system/v4l2-relayd@sp12-front.service.d/sp12-autoframe.conf" \
+		"${pkgdir}/usr/lib/systemd/system/v4l2-relayd@sp12-front.service.d/sp12-autoframe.conf"
+	install -Dm644 "$u/usr/lib/tmpfiles.d/sp12-autoframe.conf" \
+		"${pkgdir}/usr/lib/tmpfiles.d/sp12-autoframe.conf"
+	install -Dm644 "$u/usr/lib/systemd/user/sp12-autoframe.service" \
+		"${pkgdir}/usr/lib/systemd/user/sp12-autoframe.service"
+	# Restores the saved settings at login for every user (statically wanted).
+	install -d "${pkgdir}/usr/lib/systemd/user/default.target.wants"
+	ln -s ../sp12-autoframe.service "${pkgdir}/usr/lib/systemd/user/default.target.wants/sp12-autoframe.service"
+}

@@ -27,10 +27,21 @@ icamerasrc (IMX681, PSYS, NV12 3840x2160) ! sp12autoframe ! NV12 1920x1080 ! vid
 - `install-dev.sh` / `uninstall-dev.sh` (root): stage the plugin, the model
   and a HAL config copy with 4K output under `/opt/sp12-autoframe-dev`, add
   the relay drop-in (plugin path, config path, NPU device access), rewrite
-  the relay's source pipeline, restart the relay.
-- `../userspace/usr/local/bin/sp12-autoframe`: user-side toggle
-  (`auto|off|toggle|status`, `--zoom N`, `--boxes on|off`) through
-  `/run/sp12/autoframe`, re-read by the element within a second.
+  the relay's source pipeline, restart the relay. For hacking on the element;
+  `install-package.sh` (root) replaces it with the package.
+- `../pkg/sp12-autoframe`: the package: the plugin in `/usr/lib/gstreamer-1.0`,
+  the model in `/usr/share/sp12`, the toggle, a second relay environment file
+  (`/etc/v4l2-relayd.d/sp12-front-autoframe.conf`, loaded after the relay's
+  own by the unit drop-in so its `VIDEOSRC` wins and removing the package
+  leaves the plain relay), the NPU device rule for the unit, tmpfiles for
+  `/run/sp12`, and a user unit that restores the saved settings at login.
+  Needs the 4K entries in the HAL profile (sp12-camera-hal built from
+  `isp/config/sensors/imx681-uf.json` after 2026-11-05).
+- `../userspace/usr/local/bin/sp12-autoframe`: user-side control
+  (`auto|off|toggle|status|restore`, `--face F`, `--zoom N`, `--headroom H`,
+  `--speed S`, `--hold T`, `--boxes on|off`) through `/run/sp12/autoframe`,
+  re-read by the element within a second, and saved to
+  `~/.config/sp12/autoframe.conf`.
 
 ## Build and offline test
 
