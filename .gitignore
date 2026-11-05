@@ -42,3 +42,6 @@ dkms/psys/*.mod.c
 dkms/psys/.*.cmd
 dkms/psys/Module.symvers
 dkms/psys/modules.order
+
+# Downloaded sources.
+pkg/*/*.onnx

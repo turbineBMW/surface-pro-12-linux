@@ -1,0 +1,493 @@
+// sp12autoframe: automatic framing (face-following crop) for the Surface
+// Pro 12 front camera. NV12 in at any size, NV12 out at the negotiated size;
+// a YuNet face detector on the NPU (OpenVINO) finds the face(s), the
+// controller in framing.h decides the window, OpenCV crops and scales.
+//
+// Pipeline: icamerasrc ! NV12 3840x2160 ! sp12autoframe ! NV12 1920x1080 ! ...
+// SPDX-License-Identifier: MIT
+#include <gst/gst.h>
+#include <gst/video/gstvideofilter.h>
+#include <gst/video/video.h>
+#include <opencv2/core/utility.hpp>
+#include <opencv2/imgproc.hpp>
+#include <sys/stat.h>
+
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "framing.h"
+#include "yunet.h"
+
+GST_DEBUG_CATEGORY_STATIC(gst_sp12_autoframe_debug);
+#define GST_CAT_DEFAULT gst_sp12_autoframe_debug
+
+#define DEFAULT_MODEL "/usr/share/sp12/face_detection_yunet_2023mar.onnx"
+#define DEFAULT_DEVICE "NPU"
+
+struct State {
+    std::unique_ptr<sp12::YuNet> det;
+    sp12::Controller ctl;
+    std::vector<sp12::Det> dets;  // last detections, source pixels
+    cv::Mat ysmall, uvsmall, nv12small, bgr;
+    guint64 frame_no = 0;
+    GstClockTime last_pts = GST_CLOCK_TIME_NONE;
+    time_t ctl_mtime = 0;
+    double t_det = 0, t_crop = 0;
+    int n_timed = 0;
+    int in_w = 0, in_h = 0, out_w = 0, out_h = 0;
+};
+
+typedef struct _GstSp12AutoFrame {
+    GstVideoFilter parent;
+    /* properties */
+    gboolean enable;
+    gchar *device;
+    gchar *model;
+    gint det_width, det_height;
+    gdouble max_zoom, face_frac, headroom, speed, hold_time;
+    gboolean group;
+    gint detect_interval;
+    gchar *control_file;
+    gboolean draw_boxes;
+    /* state */
+    State *st;
+} GstSp12AutoFrame;
+
+typedef struct _GstSp12AutoFrameClass {
+    GstVideoFilterClass parent_class;
+} GstSp12AutoFrameClass;
+
+enum {
+    PROP_0,
+    PROP_ENABLE,
+    PROP_DEVICE,
+    PROP_MODEL,
+    PROP_DET_WIDTH,
+    PROP_DET_HEIGHT,
+    PROP_MAX_ZOOM,
+    PROP_FACE_FRAC,
+    PROP_HEADROOM,
+    PROP_SPEED,
+    PROP_HOLD_TIME,
+    PROP_GROUP,
+    PROP_DETECT_INTERVAL,
+    PROP_CONTROL_FILE,
+    PROP_DRAW_BOXES,
+};
+
+#define CAPS_STR GST_VIDEO_CAPS_MAKE("NV12")
+static GstStaticPadTemplate sink_template =
+    GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS(CAPS_STR));
+static GstStaticPadTemplate src_template =
+    GST_STATIC_PAD_TEMPLATE("src", GST_PAD_SRC, GST_PAD_ALWAYS, GST_STATIC_CAPS(CAPS_STR));
+
+#define GST_TYPE_SP12_AUTOFRAME (gst_sp12_autoframe_get_type())
+G_DEFINE_TYPE(GstSp12AutoFrame, gst_sp12_autoframe, GST_TYPE_VIDEO_FILTER);
+#define GST_SP12_AUTOFRAME(obj) (G_TYPE_CHECK_INSTANCE_CAST((obj), GST_TYPE_SP12_AUTOFRAME, GstSp12AutoFrame))
+
+static void apply_params(GstSp12AutoFrame *self) {
+    sp12::FrameParams &p = self->st->ctl.p;
+    p.max_zoom = self->max_zoom;
+    p.face_frac = self->face_frac;
+    p.headroom = self->headroom;
+    p.omega = self->speed;
+    p.hold_time = self->hold_time;
+    p.group = self->group;
+    self->st->ctl.set_enabled(self->enable);
+}
+
+static void gst_sp12_autoframe_set_property(GObject *object, guint prop_id, const GValue *value,
+                                            GParamSpec *pspec) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(object);
+    GST_OBJECT_LOCK(self);
+    switch (prop_id) {
+    case PROP_ENABLE: self->enable = g_value_get_boolean(value); break;
+    case PROP_DEVICE: g_free(self->device); self->device = g_value_dup_string(value); break;
+    case PROP_MODEL: g_free(self->model); self->model = g_value_dup_string(value); break;
+    case PROP_DET_WIDTH: self->det_width = g_value_get_int(value); break;
+    case PROP_DET_HEIGHT: self->det_height = g_value_get_int(value); break;
+    case PROP_MAX_ZOOM: self->max_zoom = g_value_get_double(value); break;
+    case PROP_FACE_FRAC: self->face_frac = g_value_get_double(value); break;
+    case PROP_HEADROOM: self->headroom = g_value_get_double(value); break;
+    case PROP_SPEED: self->speed = g_value_get_double(value); break;
+    case PROP_HOLD_TIME: self->hold_time = g_value_get_double(value); break;
+    case PROP_GROUP: self->group = g_value_get_boolean(value); break;
+    case PROP_DETECT_INTERVAL: self->detect_interval = g_value_get_int(value); break;
+    case PROP_CONTROL_FILE:
+        g_free(self->control_file);
+        self->control_file = g_value_dup_string(value);
+        self->st->ctl_mtime = 0;
+        break;
+    case PROP_DRAW_BOXES: self->draw_boxes = g_value_get_boolean(value); break;
+    default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec); break;
+    }
+    apply_params(self);
+    GST_OBJECT_UNLOCK(self);
+}
+
+static void gst_sp12_autoframe_get_property(GObject *object, guint prop_id, GValue *value,
+                                            GParamSpec *pspec) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(object);
+    GST_OBJECT_LOCK(self);
+    switch (prop_id) {
+    case PROP_ENABLE: g_value_set_boolean(value, self->enable); break;
+    case PROP_DEVICE: g_value_set_string(value, self->device); break;
+    case PROP_MODEL: g_value_set_string(value, self->model); break;
+    case PROP_DET_WIDTH: g_value_set_int(value, self->det_width); break;
+    case PROP_DET_HEIGHT: g_value_set_int(value, self->det_height); break;
+    case PROP_MAX_ZOOM: g_value_set_double(value, self->max_zoom); break;
+    case PROP_FACE_FRAC: g_value_set_double(value, self->face_frac); break;
+    case PROP_HEADROOM: g_value_set_double(value, self->headroom); break;
+    case PROP_SPEED: g_value_set_double(value, self->speed); break;
+    case PROP_HOLD_TIME: g_value_set_double(value, self->hold_time); break;
+    case PROP_GROUP: g_value_set_boolean(value, self->group); break;
+    case PROP_DETECT_INTERVAL: g_value_set_int(value, self->detect_interval); break;
+    case PROP_CONTROL_FILE: g_value_set_string(value, self->control_file); break;
+    case PROP_DRAW_BOXES: g_value_set_boolean(value, self->draw_boxes); break;
+    default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec); break;
+    }
+    GST_OBJECT_UNLOCK(self);
+}
+
+static void gst_sp12_autoframe_finalize(GObject *object) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(object);
+    delete self->st;
+    g_free(self->device);
+    g_free(self->model);
+    g_free(self->control_file);
+    G_OBJECT_CLASS(gst_sp12_autoframe_parent_class)->finalize(object);
+}
+
+/* Any input size maps to any output size: strip width/height. */
+static GstCaps *gst_sp12_autoframe_transform_caps(GstBaseTransform *trans, GstPadDirection direction,
+                                                  GstCaps *caps, GstCaps *filter) {
+    GstCaps *ret = gst_caps_copy(caps);
+    for (guint i = 0; i < gst_caps_get_size(ret); i++) {
+        GstStructure *s = gst_caps_get_structure(ret, i);
+        gst_structure_set(s, "width", GST_TYPE_INT_RANGE, 2, G_MAXINT, "height", GST_TYPE_INT_RANGE, 2,
+                          G_MAXINT, NULL);
+        gst_structure_remove_fields(s, "pixel-aspect-ratio", NULL);
+    }
+    if (filter) {
+        GstCaps *tmp = gst_caps_intersect_full(filter, ret, GST_CAPS_INTERSECT_FIRST);
+        gst_caps_unref(ret);
+        ret = tmp;
+    }
+    GST_DEBUG_OBJECT(trans, "transform_caps %s: %" GST_PTR_FORMAT " -> %" GST_PTR_FORMAT,
+                     direction == GST_PAD_SINK ? "sink" : "src", caps, ret);
+    return ret;
+}
+
+/* Prefer the input size when the other side leaves the size open. */
+static GstCaps *gst_sp12_autoframe_fixate_caps(GstBaseTransform *trans, GstPadDirection direction,
+                                               GstCaps *caps, GstCaps *othercaps) {
+    (void)trans;
+    (void)direction;
+    GstStructure *in = gst_caps_get_structure(caps, 0);
+    gint w = 0, h = 0;
+    gst_structure_get_int(in, "width", &w);
+    gst_structure_get_int(in, "height", &h);
+    othercaps = gst_caps_make_writable(othercaps);
+    othercaps = gst_caps_truncate(othercaps);
+    GstStructure *out = gst_caps_get_structure(othercaps, 0);
+    if (w > 0) gst_structure_fixate_field_nearest_int(out, "width", w);
+    if (h > 0) gst_structure_fixate_field_nearest_int(out, "height", h);
+    const GValue *fr = gst_structure_get_value(in, "framerate");
+    if (fr && GST_VALUE_HOLDS_FRACTION(fr))
+        gst_structure_fixate_field_nearest_fraction(out, "framerate", gst_value_get_fraction_numerator(fr),
+                                                    gst_value_get_fraction_denominator(fr));
+    return gst_caps_fixate(othercaps);
+}
+
+static gboolean gst_sp12_autoframe_set_info(GstVideoFilter *filter, GstCaps *incaps, GstVideoInfo *in_info,
+                                            GstCaps *outcaps, GstVideoInfo *out_info) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(filter);
+    (void)incaps;
+    (void)outcaps;
+    State *st = self->st;
+    st->in_w = GST_VIDEO_INFO_WIDTH(in_info);
+    st->in_h = GST_VIDEO_INFO_HEIGHT(in_info);
+    st->out_w = GST_VIDEO_INFO_WIDTH(out_info);
+    st->out_h = GST_VIDEO_INFO_HEIGHT(out_info);
+    GST_OBJECT_LOCK(self);
+    st->ctl.reset(st->in_w, st->in_h, (float)st->out_w / st->out_h);
+    apply_params(self);
+    GST_OBJECT_UNLOCK(self);
+    st->dets.clear();
+    st->last_pts = GST_CLOCK_TIME_NONE;
+    GST_INFO_OBJECT(self, "in %dx%d -> out %dx%d, full window %.0f px wide, max zoom %.2f", st->in_w,
+                    st->in_h, st->out_w, st->out_h, st->ctl.current().w, self->max_zoom);
+    return TRUE;
+}
+
+static gboolean gst_sp12_autoframe_start(GstBaseTransform *trans) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(trans);
+    State *st = self->st;
+    GST_OBJECT_LOCK(self);
+    std::string model = self->model ? self->model : DEFAULT_MODEL;
+    std::string want = self->device ? self->device : DEFAULT_DEVICE;
+    int dw = self->det_width, dh = self->det_height;
+    GST_OBJECT_UNLOCK(self);
+    /* The per-frame OpenCV work is ~2 ms; spreading it over a thread pool
+     * costs more in wake-ups than it saves (13 idle-spinning workers measured). */
+    cv::setNumThreads(1);
+    const char *order[] = {want.c_str(), "GPU", "CPU"};
+    std::string err;
+    for (const char *dev : order) {
+        try {
+            st->det.reset(new sp12::YuNet(model, dev, dw, dh));
+            break;
+        } catch (const std::exception &e) {
+            err = e.what();
+            GST_WARNING_OBJECT(self, "face detector on %s failed: %s", dev, e.what());
+        }
+    }
+    if (!st->det) {
+        GST_ELEMENT_ERROR(self, LIBRARY, INIT, ("Face detector unavailable"), ("%s: %s", model.c_str(), err.c_str()));
+        return FALSE;
+    }
+    GST_INFO_OBJECT(self, "face detector %s on %s, %dx%d", model.c_str(), st->det->device().c_str(), dw, dh);
+    st->frame_no = 0;
+    st->t_det = st->t_crop = 0;
+    st->n_timed = 0;
+    return TRUE;
+}
+
+static gboolean gst_sp12_autoframe_stop(GstBaseTransform *trans) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(trans);
+    self->st->det.reset();
+    return TRUE;
+}
+
+/* Control file: "mode=auto|off" lines, re-read when its mtime changes.
+ * Lets a user-session toggle reach the element inside the system relay. */
+static void poll_control_file(GstSp12AutoFrame *self) {
+    GST_OBJECT_LOCK(self);
+    gchar *path = g_strdup(self->control_file);
+    GST_OBJECT_UNLOCK(self);
+    if (!path) return;
+    struct stat sb;
+    if (stat(path, &sb) != 0) {
+        g_free(path);
+        return;
+    }
+    if (sb.st_mtime == self->st->ctl_mtime) {
+        g_free(path);
+        return;
+    }
+    self->st->ctl_mtime = sb.st_mtime;
+    gchar *data = nullptr;
+    if (g_file_get_contents(path, &data, nullptr, nullptr)) {
+        gchar **lines = g_strsplit(data, "\n", -1);
+        for (gchar **l = lines; *l; l++) {
+            gchar *line = g_strstrip(*l);
+            if (g_str_has_prefix(line, "mode=")) {
+                gboolean on = g_strcmp0(line + 5, "off") != 0;
+                GST_INFO_OBJECT(self, "control file: mode=%s", line + 5);
+                g_object_set(self, "enable", on, NULL);
+            } else if (g_str_has_prefix(line, "max-zoom=")) {
+                g_object_set(self, "max-zoom", g_ascii_strtod(line + 9, nullptr), NULL);
+            } else if (g_str_has_prefix(line, "face-frac=")) {
+                g_object_set(self, "face-frac", g_ascii_strtod(line + 10, nullptr), NULL);
+            } else if (g_str_has_prefix(line, "headroom=")) {
+                g_object_set(self, "headroom", g_ascii_strtod(line + 9, nullptr), NULL);
+            } else if (g_str_has_prefix(line, "speed=")) {
+                g_object_set(self, "speed", g_ascii_strtod(line + 6, nullptr), NULL);
+            } else if (g_str_has_prefix(line, "hold-time=")) {
+                g_object_set(self, "hold-time", g_ascii_strtod(line + 10, nullptr), NULL);
+            } else if (g_str_has_prefix(line, "draw-boxes=")) {
+                g_object_set(self, "draw-boxes", g_strcmp0(line + 11, "1") == 0 || g_strcmp0(line + 11, "true") == 0, NULL);
+            }
+        }
+        g_strfreev(lines);
+        g_free(data);
+    }
+    g_free(path);
+}
+
+static GstFlowReturn gst_sp12_autoframe_transform_frame(GstVideoFilter *filter, GstVideoFrame *in,
+                                                        GstVideoFrame *out) {
+    GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(filter);
+    State *st = self->st;
+    const int iw = st->in_w, ih = st->in_h, ow = st->out_w, oh = st->out_h;
+
+    if (st->frame_no % 30 == 0) poll_control_file(self);
+
+    /* frame interval from timestamps, 1/30 s when unknown */
+    float dt = 1.f / 30;
+    GstClockTime pts = GST_BUFFER_PTS(in->buffer);
+    if (GST_CLOCK_TIME_IS_VALID(pts) && GST_CLOCK_TIME_IS_VALID(st->last_pts) && pts > st->last_pts) {
+        dt = (float)((pts - st->last_pts) / 1e9);
+        if (dt > 0.5f) dt = 0.5f;
+    }
+    st->last_pts = pts;
+
+    cv::Mat y_in(ih, iw, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(in, 0), GST_VIDEO_FRAME_PLANE_STRIDE(in, 0));
+    cv::Mat uv_in(ih / 2, iw / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(in, 1), GST_VIDEO_FRAME_PLANE_STRIDE(in, 1));
+
+    GST_OBJECT_LOCK(self);
+    gboolean enabled = self->enable, draw = self->draw_boxes;
+    int interval = self->detect_interval > 0 ? self->detect_interval : 1;
+    GST_OBJECT_UNLOCK(self);
+
+    /* 1. detect (every `interval` frames; the controller holds the last result) */
+    gint64 t0 = g_get_monotonic_time();
+    if (enabled && st->det && st->frame_no % interval == 0) {
+        /* Letterbox: scale to the detector width keeping the aspect (an
+         * integer ratio for 4K and 1080p, which is OpenCV's fast INTER_AREA
+         * path), pad the rest. 3840x2160 -> 320x180 in a 320x192 input. */
+        const int dw = st->det->width(), dh = st->det->height();
+        int tw = dw, th = std::min(dh, (int)std::lround((double)ih * dw / iw)) & ~1;
+        if (th < 2) th = 2;
+        if (st->nv12small.empty()) {
+            st->nv12small.create(dh * 3 / 2, dw, CV_8UC1);
+            st->nv12small(cv::Rect(0, 0, dw, dh)).setTo(0);
+            st->nv12small(cv::Rect(0, dh, dw, dh / 2)).setTo(128);
+        }
+        cv::Mat ydst = st->nv12small(cv::Rect(0, 0, tw, th));
+        cv::resize(y_in, ydst, ydst.size(), 0, 0, cv::INTER_AREA);
+        cv::resize(uv_in, st->uvsmall, cv::Size(tw / 2, th / 2), 0, 0, cv::INTER_AREA);
+        st->uvsmall.reshape(1, th / 2).copyTo(st->nv12small(cv::Rect(0, dh, tw, th / 2)));
+        cv::cvtColor(st->nv12small, st->bgr, cv::COLOR_YUV2BGR_NV12);
+        st->dets = st->det->infer(st->bgr);
+        const float sx = (float)iw / tw, sy = (float)ih / th;
+        for (auto &d : st->dets) {
+            d.x *= sx; d.w *= sx; d.y *= sy; d.h *= sy;
+        }
+    }
+    gint64 t1 = g_get_monotonic_time();
+
+    /* 2. decide the window */
+    GST_OBJECT_LOCK(self);
+    sp12::Window win = st->ctl.step(st->dets, dt);
+    GST_OBJECT_UNLOCK(self);
+    int x = ((int)std::lround(win.x)) & ~1, y = ((int)std::lround(win.y)) & ~1;
+    int w = ((int)std::lround(win.w)) & ~1, h = ((int)std::lround(win.h)) & ~1;
+    if (w < 2) w = 2;
+    if (h < 2) h = 2;
+    if (x + w > iw) x = iw - w;
+    if (y + h > ih) y = ih - h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    /* 3. crop + scale */
+    cv::Mat y_out(oh, ow, CV_8UC1, GST_VIDEO_FRAME_PLANE_DATA(out, 0), GST_VIDEO_FRAME_PLANE_STRIDE(out, 0));
+    cv::Mat uv_out(oh / 2, ow / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(out, 1), GST_VIDEO_FRAME_PLANE_STRIDE(out, 1));
+    if (w == ow && h == oh) {
+        y_in(cv::Rect(x, y, w, h)).copyTo(y_out);
+        uv_in(cv::Rect(x / 2, y / 2, w / 2, h / 2)).copyTo(uv_out);
+    } else {
+        /* INTER_AREA only at >= 2x (OpenCV's integer fast path, ~1.5 ms);
+         * its generic path at 1.x ratios costs 8 ms single-threaded. */
+        int interp = w >= 2 * ow ? cv::INTER_AREA : cv::INTER_LINEAR;
+        cv::resize(y_in(cv::Rect(x, y, w, h)), y_out, y_out.size(), 0, 0, interp);
+        cv::resize(uv_in(cv::Rect(x / 2, y / 2, w / 2, h / 2)), uv_out, uv_out.size(), 0, 0, interp);
+    }
+    gint64 t2 = g_get_monotonic_time();
+
+    if (draw) {
+        const float sx = (float)ow / w, sy = (float)oh / h;
+        for (const auto &d : st->dets)
+            cv::rectangle(y_out, cv::Rect((int)((d.x - x) * sx), (int)((d.y - y) * sy), (int)(d.w * sx), (int)(d.h * sy)),
+                          cv::Scalar(235), 2);
+    }
+
+    st->t_det += (t1 - t0) / 1000.0;
+    st->t_crop += (t2 - t1) / 1000.0;
+    if (++st->n_timed == 300) {
+        GST_DEBUG_OBJECT(self, "avg per frame: detect %.2f ms, crop+scale %.2f ms; window %d,%d %dx%d zoom %.2f, %zu face(s)",
+                         st->t_det / 300, st->t_crop / 300, x, y, w, h, st->ctl.current().w > 0 ? (float)std::min(iw, (int)(ih * (float)ow / oh)) / w : 0.f,
+                         st->dets.size());
+        st->t_det = st->t_crop = 0;
+        st->n_timed = 0;
+    }
+    st->frame_no++;
+    return GST_FLOW_OK;
+}
+
+static void gst_sp12_autoframe_class_init(GstSp12AutoFrameClass *klass) {
+    GObjectClass *gobject_class = G_OBJECT_CLASS(klass);
+    GstElementClass *element_class = GST_ELEMENT_CLASS(klass);
+    GstBaseTransformClass *trans_class = GST_BASE_TRANSFORM_CLASS(klass);
+    GstVideoFilterClass *filter_class = GST_VIDEO_FILTER_CLASS(klass);
+
+    gobject_class->set_property = gst_sp12_autoframe_set_property;
+    gobject_class->get_property = gst_sp12_autoframe_get_property;
+    gobject_class->finalize = gst_sp12_autoframe_finalize;
+
+    auto flags = (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+    g_object_class_install_property(gobject_class, PROP_ENABLE,
+        g_param_spec_boolean("enable", "Enable", "Follow faces (false: full view, scaled)", TRUE, flags));
+    g_object_class_install_property(gobject_class, PROP_DEVICE,
+        g_param_spec_string("device", "Device", "OpenVINO device for the detector (NPU, GPU, CPU); falls back GPU, CPU", DEFAULT_DEVICE, flags));
+    g_object_class_install_property(gobject_class, PROP_MODEL,
+        g_param_spec_string("model", "Model", "YuNet ONNX model path", DEFAULT_MODEL, flags));
+    g_object_class_install_property(gobject_class, PROP_DET_WIDTH,
+        g_param_spec_int("det-width", "Detector width", "Detector input width (multiple of 32)", 32, 1024, 320, flags));
+    g_object_class_install_property(gobject_class, PROP_DET_HEIGHT,
+        g_param_spec_int("det-height", "Detector height", "Detector input height (multiple of 32)", 32, 1024, 192, flags));
+    g_object_class_install_property(gobject_class, PROP_MAX_ZOOM,
+        g_param_spec_double("max-zoom", "Max zoom", "Tightest crop as a factor of the full view", 1.0, 8.0, 2.0, flags));
+    g_object_class_install_property(gobject_class, PROP_FACE_FRAC,
+        g_param_spec_double("face-frac", "Face fraction", "Face height as a fraction of the window height", 0.1, 0.9, 0.30, flags));
+    g_object_class_install_property(gobject_class, PROP_HEADROOM,
+        g_param_spec_double("headroom", "Headroom", "Face centre above window centre, fraction of window height", -0.3, 0.4, 0.12, flags));
+    g_object_class_install_property(gobject_class, PROP_SPEED,
+        g_param_spec_double("speed", "Speed", "Spring natural frequency, rad/s (bigger: snappier)", 0.5, 20.0, 4.0, flags));
+    g_object_class_install_property(gobject_class, PROP_HOLD_TIME,
+        g_param_spec_double("hold-time", "Hold time", "Seconds to hold the window after the face is lost", 0.0, 60.0, 3.0, flags));
+    g_object_class_install_property(gobject_class, PROP_GROUP,
+        g_param_spec_boolean("group", "Group", "Frame all faces (false: the largest)", TRUE, flags));
+    g_object_class_install_property(gobject_class, PROP_DETECT_INTERVAL,
+        g_param_spec_int("detect-interval", "Detect interval", "Run the detector every N frames", 1, 30, 2, flags));
+    g_object_class_install_property(gobject_class, PROP_CONTROL_FILE,
+        g_param_spec_string("control-file", "Control file", "File with mode=auto|off (and max-zoom=, face-frac=, headroom=, speed=, hold-time=, draw-boxes=), re-read on change", NULL, flags));
+    g_object_class_install_property(gobject_class, PROP_DRAW_BOXES,
+        g_param_spec_boolean("draw-boxes", "Draw boxes", "Draw detections on the output (debug)", FALSE, flags));
+
+    gst_element_class_set_static_metadata(element_class, "Surface Pro 12 automatic framing", "Filter/Effect/Video",
+        "Crops and scales NV12 video to follow faces (YuNet on the NPU through OpenVINO)",
+        "surface-pro-12-linux");
+    gst_element_class_add_static_pad_template(element_class, &sink_template);
+    gst_element_class_add_static_pad_template(element_class, &src_template);
+
+    trans_class->transform_caps = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_transform_caps);
+    trans_class->fixate_caps = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_fixate_caps);
+    trans_class->start = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_start);
+    trans_class->stop = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_stop);
+    filter_class->set_info = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_set_info);
+    filter_class->transform_frame = GST_DEBUG_FUNCPTR(gst_sp12_autoframe_transform_frame);
+}
+
+static void gst_sp12_autoframe_init(GstSp12AutoFrame *self) {
+    self->enable = TRUE;
+    self->device = g_strdup(DEFAULT_DEVICE);
+    self->model = g_strdup(DEFAULT_MODEL);
+    self->det_width = 320;
+    self->det_height = 192;
+    self->max_zoom = 2.0;
+    self->face_frac = 0.30;
+    self->headroom = 0.12;
+    self->speed = 4.0;
+    self->hold_time = 3.0;
+    self->group = TRUE;
+    self->detect_interval = 2;
+    self->control_file = NULL;
+    self->draw_boxes = FALSE;
+    self->st = new State();
+    apply_params(self);
+    gst_base_transform_set_passthrough(GST_BASE_TRANSFORM(self), FALSE);
+    gst_base_transform_set_in_place(GST_BASE_TRANSFORM(self), FALSE);
+}
+
+static gboolean plugin_init(GstPlugin *plugin) {
+    GST_DEBUG_CATEGORY_INIT(gst_sp12_autoframe_debug, "sp12autoframe", 0, "Surface Pro 12 automatic framing");
+    return gst_element_register(plugin, "sp12autoframe", GST_RANK_NONE, GST_TYPE_SP12_AUTOFRAME);
+}
+
+#define PACKAGE "sp12-autoframe"
+GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, sp12autoframe, "Surface Pro 12 automatic framing",
+                  plugin_init, "0.1", "MIT/X11", "sp12-autoframe", "https://github.com/turbineBMW/surface-pro-12-linux")
