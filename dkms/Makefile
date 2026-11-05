@@ -10,6 +10,10 @@ all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/bridge modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/isys modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/power modules
+ifeq ($(shell printf '%s\n' 7.4 $(firstword $(subst -, ,$(KVER))) | sort -V | head -n1),7.4)
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/psys IPU6_SRC=$(CURDIR)/isys modules
+endif
 
 clean:
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/psys clean
 	rm -rf surface bluetooth input nfc media bridge isys power src

@@ -32,3 +32,12 @@ limine/qemu/*.log
 
 # Python bytecode caches.
 __pycache__/
+
+# Kernel module build run in place (dkms/psys is built from its own dir).
+dkms/psys/*.o
+dkms/psys/*.ko
+dkms/psys/*.mod
+dkms/psys/*.mod.c
+dkms/psys/.*.cmd
+dkms/psys/Module.symvers
+dkms/psys/modules.order

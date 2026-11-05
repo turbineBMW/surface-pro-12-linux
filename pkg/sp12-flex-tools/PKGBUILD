@@ -8,7 +8,7 @@
 # Sources: ../../userspace.
 
 pkgname=sp12-flex-tools
-pkgver=1.28
+pkgver=1.29
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): Flex Keyboard Bluetooth OOB pairing, reconnect-on-detach, camera ISP default, battery charge limit, keyboard wake, IR camera wiring, ambient light stream, NFC reader"
 arch=('any')
@@ -47,6 +47,8 @@ package() {
 		"${pkgdir}/usr/lib/systemd/system/sp12-ir-camera.service"
 	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-ir-camera.rules" \
 		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-ir-camera.rules"
+	install -Dm644 "$u/usr/lib/udev/rules.d/70-sp12-psys.rules" \
+		"${pkgdir}/usr/lib/udev/rules.d/70-sp12-psys.rules"
 	install -Dm755 "$u/usr/lib/sp12/sp12-als" "${pkgdir}/usr/lib/sp12/sp12-als"
 	install -Dm644 "$u/usr/lib/systemd/system/sp12-als.service" \
 		"${pkgdir}/usr/lib/systemd/system/sp12-als.service"

@@ -14,6 +14,8 @@
 # intel_ipu7.force_probe=1), so 7.4+ builds intel-ipu6-isys from the
 # patches-7.4/ series and older kernels build intel-ipu7-isys from patches/.
 # dkms.conf makes the same choice.
+# psys/ (the IPU7 PSYS driver on the ipu6 core) is checked in, not generated;
+# its Kbuild takes the ipu6 private headers from the isys/ copy made here.
 set -eu
 
 make_cache=
