@@ -306,6 +306,37 @@ opening it boots the firmware (`0x57a7e000 → 0x57a7d010 → 0x57a7d300 →
 gives `dev close done`, `stop fw done`, sub-domains off. `IPU_IOC_QUERYCAP`
 is not implemented by Intel's dispatcher (ENOTTY is expected).
 
+**Stage 2 in progress (2026-11-04).** Tools, profiles and patches are in
+`isp/` (nothing Windows-derived). Findings from comparing our graph-100002
+blocks with Intel's Linux OV13B10/OV08X40 graphs of the same release
+(`isp/tools/graph-dump`):
+- Already equal: stream ids 60001, sink mapping, the flag bytes Glauser had
+  to clear (DOL leftovers), ifd bpp 10→16. None of his DOL fixes apply.
+- The packed-input difference is confined to the LBFF input feeder
+  (`ifd_pipe_1_3`, 55223) and link 2: word 10 [31:16] = height; words 11 and
+  24 [31:16] = stride (Windows 4928 = ⌈3844/25⌉×32; Linux 7744 =
+  ALIGN64(3844×2)); **word 19 | word 18 [31:24] = stride×height/256** (checked
+  on five files: 4224×1560/256 = 0x648c, 8448×3120/256 = 0x19230,
+  7744×2176/256 = 0x10120, 4928×2640/256 = 0xc684, 5248×2806/256 = 0xe0b3);
+  word 36 [31:24] = 1 for packed input; link 2 buffer = stride×height. Intel's
+  Linux graphs also stream links 7, 8 and 10 and set 0x00020000 in word 34 of
+  BBPS records 25579/20865; `linuxize-100002` applies both (`--windows-links`
+  keeps Windows' values for an A/B).
+- The IMX681 graph crops one column at the LBFF input (`crop left 1`), the
+  RGGB→GRBG shift for a pipeline that wants GRBG; the OV13858 graph crops
+  none. Both match our drivers' outputs, so no Bayer work is needed. The
+  Windows IMX681 mode tables carry no mirror (`0015`), so this was also how
+  Windows ran.
+- The converted files pass the HAL reader (968/968, 801/801) and the HAL's
+  single-stream query key picks graph 100002 for every size we offer.
+- HAL: `MEDIA_DRIVER_NAME` is the prefix "intel-ipu", so `intel-ipu6` matches;
+  the entity prefix comes from the common config's `platform` field, set to
+  `IPU7.5`; `CAMERA_CFG_PATH` overrides the config dir. Sensors are listed as
+  `imx681-uf-2` and `ov13858-wf-0` (CSI port suffix; Capture = port×8).
+- The in-tree ISYS's packed formats are MIPI-style (4 px in 5 bytes,
+  `ipu6_isys_try_fmt_cap`), not Windows' 25-in-32, so stage 3's option 1 is
+  out; the ifd rewrite is the path.
+
 ## 6. Risks and unknowns
 
 - The `ifd` words and BBPS flag bits Glauser copied "by comparison rather than
