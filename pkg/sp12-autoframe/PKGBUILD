@@ -10,14 +10,14 @@
 # ../../autoframe and ../../userspace; the model comes from OpenCV Zoo.
 
 pkgname=sp12-autoframe
-pkgver=0.6
+pkgver=0.7
 pkgrel=1
 pkgdesc="Surface Pro 12 (Intel): automatic framing (face-following crop) for the front camera through the ISP relay"
 arch=('x86_64')
 url="https://github.com/turbineBMW/surface-pro-12-linux"
 license=('MIT' 'Apache-2.0')
 depends=('gstreamer' 'gst-plugins-base-libs' 'openvino' 'openvino-intel-npu-plugin' 'opencv'
-         'sp12-camera-hal>=2025.12.10-8' 'v4l2-relayd' 'intel-npu-driver')
+         'sp12-camera-hal>=2025.12.10-9' 'v4l2-relayd' 'intel-npu-driver')
 optdepends=('openvino-intel-gpu-plugin: GPU fallback for the face detector')
 makedepends=('meson' 'ninja' 'pkgconf')
 backup=('etc/v4l2-relayd.d/sp12-front-autoframe.env')

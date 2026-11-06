@@ -5,6 +5,7 @@
 #
 #   sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N]
 #                  [--headroom H] [--speed S] [--hold T] [--boxes on|off]
+#                  [--face-ae on|off]
 #   sp12-autoframe plugin install|remove   the Omarchy bar widget (sp12.autoframe)
 #
 #   --face F      face height as a fraction of the frame: 0.30 default
@@ -13,6 +14,8 @@
 #   --headroom H  face centre above frame centre, fraction of height (0.12)
 #   --speed S     how fast it moves, rad/s (4 default; 2 lazy, 8 snappy)
 #   --hold T      seconds to hold the shot after you leave (3)
+#   --face-ae on|off  expose for the detected face(s), also with framing off
+#                 (on by default; the faces go to the camera HAL's 3A)
 #
 # Writes /run/sp12/autoframe, which the relay re-reads within a second, so the
 # change applies to the running camera, and saves the same settings to
@@ -34,7 +37,7 @@ current() {
 declare -A kv
 while IFS='=' read -r k v; do [[ -n $k && $k != mode ]] && kv[$k]=$v; done < <(grep '=' "$ctl" 2>/dev/null || true)
 
-usage() { echo "usage: sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N] [--headroom H] [--speed S] [--hold T] [--boxes on|off]" >&2; exit 2; }
+usage() { echo "usage: sp12-autoframe [auto|off|toggle|status|restore] [--face F] [--zoom N] [--headroom H] [--speed S] [--hold T] [--boxes on|off] [--face-ae on|off]" >&2; exit 2; }
 
 plugin_id=sp12.autoframe
 plugin_src=/usr/share/sp12/omarchy/plugins/$plugin_id
@@ -82,6 +85,7 @@ while [[ $# -gt 0 ]]; do
 	--speed) kv[speed]=$(num "${2:-}"); shift ;;
 	--hold) kv[hold-time]=$(num "${2:-}"); shift ;;
 	--boxes) kv[draw-boxes]=$([[ ${2:-} == on ]] && echo 1 || echo 0); shift ;;
+	--face-ae) kv[face-ae]=$([[ ${2:-} == on ]] && echo 1 || echo 0); shift ;;
 	*) usage ;;
 	esac
 	shift

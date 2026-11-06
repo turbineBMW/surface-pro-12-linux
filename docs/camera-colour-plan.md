@@ -57,9 +57,41 @@ gap to Windows. Not the cause; the packaged file stays.
 - `libia_cp64.dll`: computational photography for stills (HDR/low light);
   explains part of the first 4K still comparison, not video.
 
+## Face-based exposure (done 2026-11-06, HAL pkgrel 10, autoframe 0.7)
+
+sp12autoframe sends its YuNet faces upstream as icamerasrc `face-regions`
+(`l,t,r,b;...` in active-array pixels, 8 px steps, only on change, cleared
+at stop and when `face-ae` is off). `isp/patches/icamerasrc-face-regions.patch`
+passes them to `Parameters::setFaceRegions`; `isp/patches/hal-face-regions.patch`
+converts them to IA coordinates in `CameraHal::setParameters` and stores them
+in `AiqResultStorage` as `FaceDetectionPVL` would (`fd_algo = CENTERNET_FD`,
+`is_video_conf`). The profile sets `"faceAeEnabled": true`.
+
+A first build did nothing: `isFaceAeEnabled()` also needs a face detect mode
+in `statistics.info.availableFaceDetectModes`, and advertising one makes
+`CameraDevice` add the HAL's own face stream for the missing PVL detector.
+`PlatformData::isExternalFaceAeEnabled()` (the profile flag alone) gates our
+path and AiqEngine's read instead. gdb dprintf on the relay then showed 13
+`setFaceRegions`/`updateFaceResult` and 114 `getFaceResult` (one per frame)
+in 7 s.
+
+Results, one stream, framing off, face AE off then on (`--face-ae`):
+
+| | dim room (AE saturated) | backlit (lights behind) |
+|---|---|---|
+| Gain off → on | 960 → 960 | 168 → 705 |
+| Face R,G,B off | 104, 86, 84 | 65, 45, 40 |
+| Face R,G,B on | 106, 86, 85 | 99, 70, 63 |
+| Frame mean off → on | 154 → 154 | 129 → 166 |
+
+Backlit, the face comes up ~55 % (+0.6 stop) and the background goes brighter,
+the trade Windows makes. In the dim room exposure (66 ms) and gain were both
+at their maximum, so there was nothing to give. Face colour ratios did not
+move: the AIQ uses the faces for AE, not visibly for AWB.
+
 ## Next steps
 
-1. **Face-aware 3A from our own detector.** The Linux HAL already has the
+1. ~~**Face-aware 3A from our own detector.**~~ Done (above). Original note: The Linux HAL already has the
    path: `faceAeEnabled` in the sensor profile makes `AiqEngine` pass
    `AiqResultStorage::getFaceResult()->ccaFaceState` to the AIQ
    (`statsParams->faces`). Only Intel's closed PVL detector fills it
