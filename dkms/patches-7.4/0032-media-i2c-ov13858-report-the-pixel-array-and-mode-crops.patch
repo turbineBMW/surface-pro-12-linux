@@ -1,0 +1,185 @@
+From 108fcca93ab1d84fc3d0f4fac05ec6402468fca1 Mon Sep 17 00:00:00 2001
+From: Brandon Williams <turbine.bmw@gmail.com>
+Date: Fri, 6 Nov 2026 12:41:59 -0500
+Subject: [PATCH] media: i2c: ov13858: report the pixel array and each mode's
+ crop
+
+The driver has no get_selection, so libcamera logs four "Unable to get
+rectangle" errors and a "sensor kernel driver needs to be fixed" warning
+each time it enumerates the sensor, and defaults the pixel array
+properties and the analogue crop to the output size.
+
+Report the 4256x3168 readout array (NATIVE_SIZE, CROP_BOUNDS), the
+4224x3136 active area with its 16-pixel border (CROP_DEFAULT) and the
+area each mode reads before binning (CROP). The full-resolution, 2x2
+and 4x4 binned modes read the whole active area; 2112x1188 reads a
+4224x2376 band and 4076x2806 a centred window.
+
+The values come from the modes' register tables (0x3800-0x3807 window,
+0x3810-0x3813 ISP offsets, 0x3814-0x3817 subsampling); without a
+datasheet the binned modes' borders are only known to within a few
+pixels, so they are given as the nominal areas. The 4076x2806 window,
+from the Windows driver, is exactly centred in this active area.
+
+Assisted-by: Claude Opus 5.5
+---
+ drivers/media/i2c/ov13858.c | 89 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+
+diff --git a/drivers/media/i2c/ov13858.c b/drivers/media/i2c/ov13858.c
+index 8bb42df7dbb3..fa15df18ca57 100644
+--- a/drivers/media/i2c/ov13858.c
++++ b/drivers/media/i2c/ov13858.c
+@@ -53,6 +53,17 @@
+ #define OV13858_VTS_60FPS		0x0648 /* 60 fps */
+ #define OV13858_VTS_MAX			0x7fff
+ 
++/*
++ * Pixel array: the full readout window is 4256x3168, with a 16-pixel border
++ * around the 4224x3136 active area.
++ */
++#define OV13858_NATIVE_WIDTH		4256
++#define OV13858_NATIVE_HEIGHT		3168
++#define OV13858_ACTIVE_LEFT		16
++#define OV13858_ACTIVE_TOP		16
++#define OV13858_ACTIVE_WIDTH		4224
++#define OV13858_ACTIVE_HEIGHT		3136
++
+ /* HBLANK control - read only */
+ #define OV13858_PPL_270MHZ		2244
+ #define OV13858_PPL_540MHZ		4488
+@@ -126,6 +137,9 @@ struct ov13858_mode {
+ 	u32 link_freq_index;
+ 	/* Default register values */
+ 	struct ov13858_reg_list reg_list;
++
++	/* Area of the pixel array the mode reads, before binning */
++	struct v4l2_rect analog_crop;
+ };
+ 
+ /* 4224x3136 needs 1080Mbps/lane, 4 lanes */
+@@ -1198,6 +1212,12 @@ static const struct ov13858_mode supported_modes[] = {
+ 			.regs = mode_4224x3136_regs,
+ 		},
+ 		.link_freq_index = OV13858_LINK_FREQ_INDEX_0,
++		.analog_crop = {
++			.left = OV13858_ACTIVE_LEFT,
++			.top = OV13858_ACTIVE_TOP,
++			.width = OV13858_ACTIVE_WIDTH,
++			.height = OV13858_ACTIVE_HEIGHT,
++		},
+ 	},
+ 	{
+ 		.width = 4076,
+@@ -1209,6 +1229,12 @@ static const struct ov13858_mode supported_modes[] = {
+ 			.regs = mode_4076x2806_regs,
+ 		},
+ 		.link_freq_index = OV13858_LINK_FREQ_INDEX_0,
++		.analog_crop = {
++			.left = 90,
++			.top = 181,
++			.width = 4076,
++			.height = 2806,
++		},
+ 	},
+ 	{
+ 		.width = 2112,
+@@ -1220,6 +1246,12 @@ static const struct ov13858_mode supported_modes[] = {
+ 			.regs = mode_2112x1568_regs,
+ 		},
+ 		.link_freq_index = OV13858_LINK_FREQ_INDEX_1,
++		.analog_crop = {
++			.left = OV13858_ACTIVE_LEFT,
++			.top = OV13858_ACTIVE_TOP,
++			.width = OV13858_ACTIVE_WIDTH,
++			.height = OV13858_ACTIVE_HEIGHT,
++		},
+ 	},
+ 	{
+ 		.width = 2112,
+@@ -1231,6 +1263,12 @@ static const struct ov13858_mode supported_modes[] = {
+ 			.regs = mode_2112x1188_regs,
+ 		},
+ 		.link_freq_index = OV13858_LINK_FREQ_INDEX_1,
++		.analog_crop = {
++			.left = OV13858_ACTIVE_LEFT,
++			.top = 396,
++			.width = OV13858_ACTIVE_WIDTH,
++			.height = 2376,
++		},
+ 	},
+ 	{
+ 		.width = 1056,
+@@ -1242,6 +1280,12 @@ static const struct ov13858_mode supported_modes[] = {
+ 			.regs = mode_1056x784_regs,
+ 		},
+ 		.link_freq_index = OV13858_LINK_FREQ_INDEX_1,
++		.analog_crop = {
++			.left = OV13858_ACTIVE_LEFT,
++			.top = OV13858_ACTIVE_TOP,
++			.width = OV13858_ACTIVE_WIDTH,
++			.height = OV13858_ACTIVE_HEIGHT,
++		},
+ 	}
+ };
+ 
+@@ -1780,11 +1824,56 @@ static const struct v4l2_subdev_video_ops ov13858_video_ops = {
+ 	.s_stream = ov13858_set_stream,
+ };
+ 
++static int ov13858_get_selection(struct v4l2_subdev *sd,
++				 const struct v4l2_subdev_client_info *ci,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_selection *sel)
++{
++	struct ov13858 *ov13858 = to_ov13858(sd);
++	const struct ov13858_mode *mode;
++	struct v4l2_mbus_framefmt *fmt;
++
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		mutex_lock(&ov13858->mutex);
++		if (sel->which == V4L2_SUBDEV_FORMAT_TRY) {
++			fmt = v4l2_subdev_state_get_format(state, sel->pad);
++			mode = v4l2_find_nearest_size(supported_modes,
++						      ARRAY_SIZE(supported_modes),
++						      width, height,
++						      fmt->width, fmt->height);
++		} else {
++			mode = ov13858->cur_mode;
++		}
++		sel->r = mode->analog_crop;
++		mutex_unlock(&ov13858->mutex);
++		return 0;
++
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = OV13858_NATIVE_WIDTH;
++		sel->r.height = OV13858_NATIVE_HEIGHT;
++		return 0;
++
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++		sel->r.left = OV13858_ACTIVE_LEFT;
++		sel->r.top = OV13858_ACTIVE_TOP;
++		sel->r.width = OV13858_ACTIVE_WIDTH;
++		sel->r.height = OV13858_ACTIVE_HEIGHT;
++		return 0;
++	}
++
++	return -EINVAL;
++}
++
+ static const struct v4l2_subdev_pad_ops ov13858_pad_ops = {
+ 	.enum_mbus_code = ov13858_enum_mbus_code,
+ 	.get_fmt = ov13858_get_pad_format,
+ 	.set_fmt = ov13858_set_pad_format,
+ 	.enum_frame_size = ov13858_enum_frame_size,
++	.get_selection = ov13858_get_selection,
+ };
+ 
+ static const struct v4l2_subdev_sensor_ops ov13858_sensor_ops = {
+-- 
+2.56.0
+
