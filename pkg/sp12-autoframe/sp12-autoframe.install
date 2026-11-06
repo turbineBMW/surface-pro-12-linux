@@ -1,9 +1,10 @@
-_relay=v4l2-relayd@sp12-front.service
+# Both relays use sp12bt601 (0.8); the front also sp12autoframe.
+_relays="v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service"
 
 post_install() {
 	systemd-tmpfiles --create sp12-autoframe.conf
 	systemctl daemon-reload
-	systemctl try-restart "$_relay" 2>/dev/null || true
+	systemctl try-restart $_relays 2>/dev/null || true
 	cat <<'EOF'
 sp12-autoframe: the "Surface Front Camera (ISP)" now follows your face.
   sp12-autoframe off | auto        switch, applies to the running camera
@@ -22,10 +23,10 @@ post_upgrade() {
 	# relay's generator started as a bogus instance of its own at every boot.
 	systemctl stop v4l2-relayd@sp12-front-autoframe.service 2>/dev/null || true
 	systemctl reset-failed v4l2-relayd@sp12-front-autoframe.service 2>/dev/null || true
-	systemctl try-restart "$_relay" 2>/dev/null || true
+	systemctl try-restart $_relays 2>/dev/null || true
 }
 
 post_remove() {
 	systemctl daemon-reload
-	systemctl try-restart "$_relay" 2>/dev/null || true
+	systemctl try-restart $_relays 2>/dev/null || true
 }

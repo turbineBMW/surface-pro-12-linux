@@ -2,7 +2,8 @@
 # properties and helper; IMX681 and OV13858 tuning (CCMs, lens shading and the
 # AWB locus from the modules' Windows tuning files, AGC limited to 1/60 s
 # before gain); and, in the CPU soft ISP, 2x2 binning, temporal and chroma
-# noise reduction, lens-shading correction and grey-zone AWB statistics.
+# noise reduction, lens-shading correction and grey-zone AWB statistics; and
+# pipelines.simple.ignored_sensors, so the IR sensor is skipped quietly.
 # Derived from Arch's libcamera PKGBUILD (David Runge, Carl Smedstad); builds
 # only libcamera, libcamera-ipa and libcamera-tools, without docs, Qt,
 # GStreamer or Python bindings.
@@ -15,7 +16,7 @@ pkgname=(
   libcamera-tools
 )
 pkgver=0.8.0
-pkgrel=1.1
+pkgrel=1.2
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS (with Surface Pro 12 camera support)"
 arch=(x86_64)
 url="https://libcamera.org/"
@@ -52,9 +53,11 @@ source=(
   0009-libcamera-software_isp-Add-lens-shading-correction-t.patch
   0010-ipa-softisp-awb-Average-the-zones-that-could-be-grey.patch
   0011-libcamera-software_isp-Crop-by-default-raw-TNR-and-c.patch
+  0012-libcamera-pipeline-simple-Skip-sensors-listed-in-the.patch
   configuration.yaml
 )
 sha512sums=('8afd6af63d062c534b4e071707770260ae9417856256d6cd49315153efbed474a8d29496bda4f2dca1b14b4aa7bfad4dd0b001a6ba0d18898e7bec8cb99b0436'
+            SKIP
             SKIP
             SKIP
             SKIP
