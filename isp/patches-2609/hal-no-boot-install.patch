@@ -1,0 +1,20 @@
+Do not install sensor images to /boot
+
+The 2026-09 release installs config/linux/<ipu>/sensors/*.img to an
+absolute /boot, which fails in a dev prefix or a package build and has
+no images for our sensors anyway.
+
+Surface Pro 12 (Intel), sp12-camera-hal.
+
+diff --git i/CMakeLists.txt w/CMakeLists.txt
+index 9dd6af3..6862957 100644
+--- i/CMakeLists.txt
++++ w/CMakeLists.txt
+@@ -378,7 +378,6 @@ elseif (IPU_VER STREQUAL "ipu6sepla")
+ elseif (IPU_VER MATCHES "ipu7.*" OR IPU_VER STREQUAL "ipu8")
+     message("Install ${IPU_VER} configure files")
+     install(DIRECTORY config/linux/${IPU_VER}/ DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/camera/${IPU_VER} PATTERN "config/linux/*/gcss/*.xml" EXCLUDE PATTERN "config/linux/*/sensors/*.img" EXCLUDE)
+-    install(DIRECTORY config/linux/${IPU_VER}/sensors/ DESTINATION /boot FILES_MATCHING PATTERN "config/linux/${IPU_VER}/sensors/*.img")
+ else()
+     message("Install APL IPU4 configure files")
+     install(DIRECTORY config/linux/ipu4/ DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/camera/${IPU_VER})
