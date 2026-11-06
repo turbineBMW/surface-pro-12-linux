@@ -18,6 +18,10 @@ EOF
 post_upgrade() {
 	systemd-tmpfiles --create sp12-autoframe.conf
 	systemctl daemon-reload
+	# Before 0.5 the relay file was a *.conf in /etc/v4l2-relayd.d, which the
+	# relay's generator started as a bogus instance of its own at every boot.
+	systemctl stop v4l2-relayd@sp12-front-autoframe.service 2>/dev/null || true
+	systemctl reset-failed v4l2-relayd@sp12-front-autoframe.service 2>/dev/null || true
 	systemctl try-restart "$_relay" 2>/dev/null || true
 }
 

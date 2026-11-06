@@ -39,6 +39,10 @@ templates, with the `Intel IPU7.5` entity names the ipu6 driver uses).
 
 - `hal-aic-timestamp.patch`: set the mandatory AIC input timestamp (Glauser).
 - `hal-arch-jsoncpp.patch`: Arch's `<json/json.h>` include path (AUR).
+- `hal-sensor-absent-controls.patch`: ask the sensor driver once whether it
+  has a writable digital gain, test pattern, VBLANK and HBLANK control and
+  skip the per-frame write when it does not (the IMX681 has none of the
+  first two and fixed blanking; three or four errors per frame before).
 - `hal-zoom-region.patch`: the HAL's pan-tilt-zoom path (an ISP-side crop
   through the output scalers) made to work: the zoom region copied into the
   per-request context, a window centred on one axis no longer treated as a

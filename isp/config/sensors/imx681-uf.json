@@ -105,7 +105,7 @@
             // 0: OFF, 1: SMPLE, 2: FULL
             "statistics.info.availableFaceDetectModes" : [0],
             // align with supportedAeExposureTimeRange
-            "sensor.info.exposureTimeRange": [ 100, 33333 ],
+            "sensor.info.exposureTimeRange": [ 100, 66666 ],
             "sensor.info.activeArraySize": [ 0, 0, 3844, 2640 ],
             "sensor.info.pixelArraySize": [3844, 2640],
             // 0:RGGB, 1:GRBG, 2:GBRG, 3:BGGR, 4:RGB

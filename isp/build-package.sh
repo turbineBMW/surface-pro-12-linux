@@ -26,6 +26,7 @@ cp "$REPO"/private/camera/psys/out/linux/IMX681_MSHW0740.IPU75XA.bin \
 cp "$WIN/imx681_extension.inf_amd64_8bc8aa270eb92060/imx681_MSHW0740_PTL.aiqb" \
    "$WIN/ov13858_extension.inf_amd64_351bd9cc51fd8e38/OV13858_MSHW0741_PTL.aiqb" "$P/tuning/"
 cp -a "$REPO/userspace/etc" "$P/userspace/"
+install -Dm755 "$REPO/userspace/usr/lib/sp12/v4l2-relay-announce" "$P/userspace/usr/lib/sp12/v4l2-relay-announce"
 
 cd "$PKG"
 makepkg -f "$@"

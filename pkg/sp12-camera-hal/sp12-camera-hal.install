@@ -13,6 +13,9 @@ EOF
 }
 
 post_upgrade() {
+	# Install scripts run before pacman's daemon-reload hook: reload first so
+	# the restarted relays use the new drop-ins.
+	systemctl daemon-reload
 	if systemctl -q is-active v4l2-relayd@sp12-front.service 2>/dev/null ||
 	   systemctl -q is-active v4l2-relayd@sp12-rear.service 2>/dev/null; then
 		systemctl try-restart v4l2-relayd@sp12-front.service v4l2-relayd@sp12-rear.service
