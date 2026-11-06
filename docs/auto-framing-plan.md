@@ -320,6 +320,17 @@ sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
    CAPTURE capability but `check_buffer_capability` still refuses capture
    format calls while no writer streams. The fix belongs in v4l2-relayd:
    drop the reset or make sure a frame reaches `v4l2sink` after it.
+
+   **Fixed 2026-11-06 (HAL pkgrel 12):** the splash does push its two frames
+   after the reset, but they are timestamped from 0 while the output
+   pipeline's clock has run on, so a syncing `v4l2sink` drops them as late
+   unless it is still prerolling in PAUSED; the output pipeline is live and
+   often reaches PLAYING first. A race, which is why debug logging hid it.
+   Our relay drop-in (`sp12-isp.conf`) now overrides `ExecStart` with the base
+   unit's command plus `sync=false` on `v4l2sink`: the relay only forwards
+   frames, and the splash frame is rendered on arrival. Rear relay before:
+   stuck after the 2nd of two 18 s sessions; after: 10 sessions (18 s, 5 s,
+   pauses 0.5-10 s) and 3 front sessions, no failure, full frame counts.
 6. **Low light, next step.** In a dim room exposure sat at 3139 of 3173 and
    analogue gain at 954 of 960. The exposure maximum is the frame length
    minus 4: with `vblank` fixed the frame is 7552 × 3177 at 720 MHz, exactly
@@ -347,6 +358,12 @@ sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
    where Windows keeps the room's warmth (244,215,182), and saturation is
    half. Suspect the `.aiqb` LAIQ records the Dec-2025 AIC does not read
    (versions one step newer, see the hardware ISP plan); not yet checked.
+
+   **Rear camera (2026-11-06, HAL pkgrel 11):** the OV13858 driver's vblank
+   was already writable (408..29961), so only the relay (`fps-range=15~30`)
+   and the profile (66666 µs) changed. In a lit room AE already ran the frame
+   a little past 30 fps length (vblank 458) with exposure at the new maximum
+   (3256 lines) and analogue gain 368 of 8191.
 
 At idle the relays cost nothing measurable (no context switches in 15
 minutes, before or after serving a client), so on-demand starting is not
