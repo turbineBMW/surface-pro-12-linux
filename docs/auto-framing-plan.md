@@ -235,11 +235,15 @@ Decision: package 0.4 defaults the relay to **crop mode** (4K, CPU crop,
 
 ## 6. Risks and open questions
 
-- **4K through PSYS** at 30 fps on the IMX681 is in the Windows graph file
-  but untested on our converted settings (only 1080p and 720p were run).
-- **PSYS/HAL per-frame zoom** (stage 3) rides on closed `ia_dvs`; if its
-  region semantics or its update latency are bad, stage 2 is the end state
-  and that is fine.
+- ~~**4K through PSYS** at 30 fps on the IMX681~~: resolved. Crop mode, the
+  package default since 0.4, runs the front relay from 3840×2160 NV12; the
+  loopback measured 29.7–30.0 fps on 2026-11-06 (15 fps in dim light by
+  design, `fps-range=15~30`).
+- ~~**PSYS/HAL per-frame zoom** rides on closed `ia_dvs`~~: resolved
+  differently. The `ia_dvs` path (graph 100003) is dead on Linux; zoom goes
+  through PTZ in graph 100002 (stage 3), lands where sent and adds no noise.
+  What keeps ISP mode off by default is the weak TNR in the downscaled
+  configurations (stage 3, "Noise"), inside the closed AIC/tuning.
 - **NPU contention**: the NPU is otherwise idle on this desktop; `irlume`
   (face unlock) uses the CPU. If both ever run at once, YuNet on the NPU is
   0.4 ms so it does not matter.
@@ -290,7 +294,37 @@ sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
    advertises Rec. 709 primaries with the BT.601 matrix. If the ISP's NV12 is
    really BT.601, labelling it so removes the conversion and is more correct;
    if it is BT.709, the conversion is right and only its cost could move.
-   Not checked yet.
+
+   **Done 2026-11-06** (sp12-autoframe 0.8-3). Measured again first: the
+   output half cost **28-31 %** of a core on both relays (front 55 % in all,
+   rear 37 %), not 10 %. The loopback's format is GStreamer `2:4:7:1`
+   (limited range, BT.601 matrix, sRGB transfer, BT.709 primaries), and
+   `videoconvert` from unlabelled (= BT.709) frames costs 21 ms per 1080p
+   frame; a transfer-only mismatch alone still costs 11 ms. Its pixels differ
+   from the input by the matrix change only (gamma and primaries modes are
+   "none"), which is linear with no Y term in the chroma rows and Cb/Cr terms
+   in the luma row independent of Y. New element **`sp12bt601`** (same
+   plugin): one lookup per 2x2 block on (Cb, Cr) gives the new chroma and a
+   luma offset, then a vectorised saturating add on the two luma rows; output
+   labelled `2:4:7:1`, and the relays' `FORMAT="NV12,colorimetry=2:4:7:1"`
+   puts the same label on `appsrc`, so the output `videoconvert` passes
+   through. Same pixels as `videoconvert` within +-2 (closer to the exact
+   maths: mean Y bias +0.08 vs videoconvert's -1.1). 1.9 ms per frame on
+   fresh buffers, ~3 ms in icamerasrc's. Gotcha: an element that offers "any
+   colorimetry" upstream lets the appsrc label leak back as a query filter,
+   icamerasrc fixates to it and the frames pass unconverted (0.8-1 did that
+   on the rear); `sp12bt601` offers an explicit list, the size's default
+   (BT.709 for HD) first, never its output label.
+
+   Result: front relay **43 %**, rear **19 %**, 30 fps on both. Package power
+   (RAPL, two rounds each, on battery): rear 2.72 -> 2.66 W, CPU cores
+   0.32 -> 0.25 W; front unchanged within noise (3.33 -> 3.19 W in the clean
+   round). The camera's power is mostly not CPU: streaming adds ~1.4 W
+   (front) and ~0.8 W (rear) over idle, of which the cores are ~0.3 W and
+   ~0.1 W. So moving the remaining CPU work (the front's 4K crop/scale,
+   ~20 %) to the GPU is not worth it: at most ~0.1 W, and `vapostproc` with
+   system-memory buffers cost as much CPU as `videoconvert` (7 ms per 1080p
+   frame, 15 ms for 4K -> 1080p) because of the uploads and downloads.
 3. **A second, broken relay at every boot: fixed** (package 0.5). The relay
    environment file was `/etc/v4l2-relayd.d/sp12-front-autoframe.conf`, and
    v4l2-relayd's generator starts one instance per `*.conf` in that
