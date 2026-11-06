@@ -45,10 +45,15 @@ gap to Windows. Not the cause; the packaged file stays.
   a **skin tone** estimate, and feeds the faces into 3A
   (`CGen3FDNode::UpdateFaceInfo`, `UpdateFaceRoiForStatistics`). AE and AWB
   on Windows are face-aware.
-- `GLTM_2_0` (global/local tone mapping 2.0) appears in the Windows CCA; none
-  of our Dec-2025 Linux `libia_*` libraries carry that string. Likely tied to
-  the LAIQ records newer than the Linux AIC reads (`0x110` is absent from the
-  Linux reference file).
+- `GLTM_2_0` (global/local tone mapping 2.0) appears in the Windows CCA.
+  **Correction (2026-11-06):** our Dec-2025 `libia_aic` has the `gltm_2_0`
+  kernel too (the first search was case-sensitive). See "Newer Intel
+  libraries" below for the real difference.
+- `IntelDeviceMFT64.dll` also carries `nntm_1_0` (neural tone mapping,
+  `CNntmNode`, `CSubwayV2NntmExecutor` on the GPU, face ROI input). It is a
+  software node (`SwNntmOuterNode`) in Intel's graph descriptions, and none
+  of the three graphs Windows ships for the IMX681 (100002, 100003, 100026)
+  contains it, so it does not apply to this camera.
 - `LensDistortionCorrection.dll` with `IMX681DeLoB35P3A5.json`: a lens
   profile plus `face_mode_undistortion_info` (ZoomRect, strength 0.5) and
   `scene_mode_undistortion_info` (Rectilinear, 0.0): face-region
@@ -105,3 +110,41 @@ move: the AIQ uses the faces for AE, not visibly for AWB.
    files converted to the newer header (hardware ISP plan, stage 4).
 3. Only then consider colour preferences (saturation/AWB bias) as our own
    tuning on top.
+
+## Newer Intel libraries (branch `camera-libs-2026-09`)
+
+Intel published two releases after the one we run (HAL `e5172cc` +
+bins `ed16ac7`, 2025-12-10): 2026-06-29 and 2026-09-26 (HAL `30ad691`,
+bins `0525cdf`, 95 HAL commits).
+
+- **Tuning records.** The 2026-09 HAL ships example `.aiqb` files (OV05C10,
+  OV8856) whose LAIQ record versions are exactly those of the Windows IMX681
+  file: `0x103` 106, `0x104` 107, `0x105` 124, `0x108` 103, `0x10c` 107,
+  `0x110` 100. The Dec-2025 example (OV13B10) is one step older on each and
+  has no `0x110`. The 2026-09 AIQ is built for our tuning generation; the
+  Dec-2025 one may skip those records.
+- **Tone mapping.** In 2026-09, `gltm_2_0` and `glim_2_0` also take the GBCE
+  results (`ia_aiq_gbce_results`) and a `gltm_glim_plc_adaptation` input;
+  new kernels `nntm_1_2`, changed `b2b`, `remosaic_1_0`, `b2i_ds_1_1`.
+- **Firmware.** bins 2026-09 carry a newer `ipu7ptl_fw.bin` (266240 ->
+  274432 bytes). Ours comes from linux-firmware (2026-09-16).
+- **Kernel.** Our PSYS port is from ipu7-drivers `484d713` (2026-10-21),
+  which already includes the 2026-09-26 release; nothing to do there.
+
+Plan:
+1. Worktrees `work/hal-2609` and `work/bins-2609` at the 2026-09 tags, so
+   the packaged build (`git archive HEAD` of `work/hal`, `work/bins`) is
+   untouched.
+2. Rebase the six HAL patches onto HAL `30ad691` (aic-timestamp,
+   arch-jsoncpp, face-regions, sensor-absent-controls, sensor-orientation,
+   zoom-region); some may be upstream by now.
+3. Graph files: HAL `main` changed the binary prologue and added
+   `isIsysUnpacked`/`additionalFeaturesBit` to the header, so the Windows
+   graph settings need the new layout and hashes (`stamp-hashes.py`), and
+   `isIsysUnpacked` may replace our `ifd` rewrite.
+4. Build into the dev prefix and run with the current firmware first; if the
+   new libraries need it, A/B Intel's 2026-09 `ipu7ptl_fw.bin` through
+   `/sys/module/firmware_class/parameters/path` (no persistence).
+5. A/B against the packaged stack: white wall, face, saturation, plus the
+   Windows video screenshot. Package only if it wins.
+
