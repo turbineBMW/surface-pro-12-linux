@@ -1,0 +1,105 @@
+From 88051f58caa966c1603651dceb5c78329bff9871 Mon Sep 17 00:00:00 2001
+From: Brandon Williams <turbine.bmw@gmail.com>
+Date: Fri, 6 Nov 2026 07:52:08 -0500
+Subject: [PATCH] media: i2c: imx681: make vertical blanking writable
+
+Vertical blanking was read-only at the 30 fps value (frame length 3177
+lines at the 720 MHz VT clock), so the exposure could never exceed one
+33 ms frame. In a dim room auto exposure then sat at 3139 of 3173 lines
+and at the top of the analogue gain range, and the picture was dark and
+noisy.
+
+Write the frame length to 0x033E under group hold, as the Windows
+driver does, allow up to 0xFFFF lines, and move the exposure maximum
+with it (frame length - 4). The minimum and default stay at the 30 fps
+mode.
+
+Assisted-by: Claude Opus 5.5
+Signed-off-by: Brandon Williams <turbine.bmw@gmail.com>
+---
+ drivers/media/i2c/imx681.c | 38 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/media/i2c/imx681.c b/drivers/media/i2c/imx681.c
+index 4b2af1da71c5..e96a11f20eae 100644
+--- a/drivers/media/i2c/imx681.c
++++ b/drivers/media/i2c/imx681.c
+@@ -39,6 +39,7 @@
+ #define IMX681_REG_EXPOSURE		CCI_REG24(0x0229)
+ #define IMX681_EXPOSURE_MIN		4
+ #define IMX681_EXPOSURE_MAX		3173	/* frame_length - 4 */
++#define IMX681_EXPOSURE_OFFSET		4	/* lines kept clear of the frame end */
+ #define IMX681_EXPOSURE_DEFAULT		1907	/* from Windows trace */
+ 
+ /*
+@@ -57,6 +58,10 @@
+ #define IMX681_LINE_LENGTH_PCK		7552	/* 0x1D80 */
+ #define IMX681_FRAME_LENGTH_LINES	3177	/* 0x0C69 */
+ 
++/* Frame length in lines; 3177 at the 720 MHz VT clock is 30 fps. */
++#define IMX681_REG_FRAME_LENGTH		CCI_REG16(0x033E)
++#define IMX681_FRAME_LENGTH_MAX		0xFFFF
++
+ /* MIPI lanes */
+ #define IMX681_NUM_LANES		2
+ 
+@@ -191,6 +196,21 @@ static int imx681_set_ctrl(struct v4l2_ctrl *ctrl)
+ 					     ctrl_handler);
+ 	int ret = 0;
+ 
++	if (ctrl->id == V4L2_CID_VBLANK) {
++		/* The exposure has to end before the frame does. */
++		s64 exposure_max = IMX681_HEIGHT + ctrl->val -
++				   IMX681_EXPOSURE_OFFSET;
++
++		ret = __v4l2_ctrl_modify_range(imx681->exposure,
++					       imx681->exposure->minimum,
++					       exposure_max,
++					       imx681->exposure->step,
++					       min(imx681->exposure->default_value,
++						   exposure_max));
++		if (ret)
++			return ret;
++	}
++
+ 	/* Only apply controls to hardware when streaming */
+ 	if (!pm_runtime_get_if_in_use(imx681->dev))
+ 		return 0;
+@@ -211,6 +231,14 @@ static int imx681_set_ctrl(struct v4l2_ctrl *ctrl)
+ 		dev_dbg(imx681->dev, "set raw analogue gain code: %d, ret=%d\n",
+ 			ctrl->val, ret);
+ 		break;
++	case V4L2_CID_VBLANK:
++		cci_write(imx681->cci, IMX681_REG_GROUP_HOLD, 0x01, &ret);
++		cci_write(imx681->cci, IMX681_REG_FRAME_LENGTH,
++			  IMX681_HEIGHT + ctrl->val, &ret);
++		cci_write(imx681->cci, IMX681_REG_GROUP_HOLD, 0x00, &ret);
++		dev_dbg(imx681->dev, "set frame length: %d, ret=%d\n",
++			IMX681_HEIGHT + ctrl->val, ret);
++		break;
+ 
+ 	default:
+ 		break;
+@@ -575,13 +603,15 @@ static int imx681_init_controls(struct imx681 *imx681)
+ 	if (imx681->hblank)
+ 		imx681->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+ 
+-	/* Vertical blanking is fixed until its sensor register is verified. */
++	/*
++	 * Vertical blanking: the minimum is the 30 fps mode; longer frames
++	 * let the exposure grow past 33 ms in low light.
++	 */
+ 	vblank = IMX681_FRAME_LENGTH_LINES - IMX681_HEIGHT;
+ 	imx681->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &imx681_ctrl_ops,
+ 					   V4L2_CID_VBLANK, vblank,
+-					   vblank, 1, vblank);
+-	if (imx681->vblank)
+-		imx681->vblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++					   IMX681_FRAME_LENGTH_MAX - IMX681_HEIGHT,
++					   1, vblank);
+ 
+ 	/* Exposure */
+ 	imx681->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &imx681_ctrl_ops,
+-- 
+2.56.0
+

@@ -1,0 +1,81 @@
+Add an fps-range property (AE frame rate range)
+
+icamerasrc passes the negotiated framerate to the HAL, which turns it
+into an AE frame-time range of exactly [1/fps, 1/fps]: at 30 fps auto
+exposure can never expose longer than 33 ms, even when the sensor
+allows longer frames and the tuning asks for them in low light.
+"fps-range=15~30" sets CAMERA_AE_TARGET_FPS_RANGE, which the HAL reads
+after the framerate (ParameterConvert), so AE may stretch frames to
+66 ms in the dark and stays at 30 fps otherwise.
+
+Surface Pro 12 (Intel), sp12-camera-hal.
+
+diff --git i/src/gstcamerasrc.cpp w/src/gstcamerasrc.cpp
+index 61683e5..70a655f 100644
+--- i/src/gstcamerasrc.cpp
++++ w/src/gstcamerasrc.cpp
+@@ -119,6 +119,7 @@ enum
+   PROP_AE_REGION,
+   PROP_AF_REGION,
+   PROP_EXPOSURE_TIME_RANGE,
++  PROP_FPS_RANGE,
+   PROP_GAIN_RANGE,
+   PROP_CONVERGE_SPEED,
+   PROP_CONVERGE_SPEED_MODE,
+@@ -1133,6 +1134,11 @@ gst_camerasrc_class_init (GstcamerasrcClass * klass)
+       g_param_spec_string("exposure-time-range","AE exposure time range","Exposure time range",
+         DEFAULT_PROP_EXPOSURE_TIME_RANGE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+ 
++  g_object_class_install_property(gobject_class,PROP_FPS_RANGE,
++      g_param_spec_string("fps-range","AE frame rate range",
++        "Frame rate range \"min~max\" auto exposure may use, e.g. 15~30 to allow frames up to 66 ms in low light. Unset: the negotiated framerate only.",
++        NULL, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
++
+   g_object_class_install_property(gobject_class,PROP_GAIN_RANGE,
+       g_param_spec_string("gain-range","AE gain range","AE gain range",
+         DEFAULT_PROP_GAIN_RANGE, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+@@ -2141,6 +2147,22 @@ gst_camerasrc_set_property (GObject * object, guint prop_id,
+       if (ret == 0)
+         src->param->setExposureTimeRange(exposure_time_range);
+       break;
++    case PROP_FPS_RANGE: {
++      camera_range_t fps_range;
++      g_free(src->man_ctl.fps_range);
++      src->man_ctl.fps_range = g_strdup(g_value_get_string(value));
++      if (src->man_ctl.fps_range &&
++          gst_camerasrc_parse_range(src->man_ctl.fps_range, fps_range.min, fps_range.max) == 0 &&
++          fps_range.min > 0 && fps_range.max >= fps_range.min) {
++        /* Overrides the [fps, fps] range the negotiated framerate implies. */
++        src->param->setFpsRange(fps_range);
++      } else {
++        GST_WARNING_OBJECT(src, "fps-range: expected \"min~max\", got \"%s\"",
++                           src->man_ctl.fps_range ? src->man_ctl.fps_range : "");
++        manual_setting = false;
++      }
++      break;
++    }
+     case PROP_GAIN_RANGE:
+       g_free(src->man_ctl.gain_range);
+       src->man_ctl.gain_range = g_strdup(g_value_get_string(value));
+@@ -2377,6 +2399,9 @@ gst_camerasrc_get_property (GObject * object, guint prop_id,
+     case PROP_EXPOSURE_TIME_RANGE:
+       g_value_set_string (value, src->man_ctl.exp_time_range);
+       break;
++    case PROP_FPS_RANGE:
++      g_value_set_string (value, src->man_ctl.fps_range);
++      break;
+     case PROP_GAIN_RANGE:
+       g_value_set_string (value, src->man_ctl.gain_range);
+       break;
+diff --git i/src/gstcamerasrc.h w/src/gstcamerasrc.h
+index 508a405..459aecc 100644
+--- i/src/gstcamerasrc.h
++++ w/src/gstcamerasrc.h
+@@ -406,6 +406,7 @@ struct _Gst3AManualControl
+   int converge_speed;
+   int converge_speed_mode;
+   gchar *exp_time_range;
++  gchar *fps_range;
+   gchar *gain_range;
+   /* Backlight Settings*/
+   int blc_area_mode;

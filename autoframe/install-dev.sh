@@ -53,9 +53,9 @@ UNIT
 [ -f "$CONF.orig" ] || cp -a "$CONF" "$CONF.orig"
 ELEM="sp12autoframe model=/opt/sp12-autoframe-dev/face_detection_yunet_2023mar.onnx control-file=/run/sp12/autoframe"
 if [ "$MODE" = isp ]; then
-	SRC="icamerasrc device-name=imx681-uf ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! $ELEM mode=isp ! video/x-raw,format=NV12,width=1920,height=1080 ! videoconvert"
+	SRC="icamerasrc device-name=imx681-uf fps-range=15~30 ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! $ELEM mode=isp ! video/x-raw,format=NV12,width=1920,height=1080 ! videoconvert"
 else
-	SRC="icamerasrc device-name=imx681-uf ! video/x-raw,format=NV12,width=3840,height=2160,framerate=30/1 ! $ELEM ! video/x-raw,format=NV12,width=1920,height=1080 ! videoconvert"
+	SRC="icamerasrc device-name=imx681-uf fps-range=15~30 ! video/x-raw,format=NV12,width=3840,height=2160,framerate=30/1 ! $ELEM ! video/x-raw,format=NV12,width=1920,height=1080 ! videoconvert"
 fi
 sed -i "s|^VIDEOSRC=.*|VIDEOSRC=\"$SRC\"|" "$CONF"
 grep ^VIDEOSRC "$CONF"

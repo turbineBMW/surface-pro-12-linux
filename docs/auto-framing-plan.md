@@ -330,6 +330,24 @@ sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
    expects. Needs a hardware check that the register lengthens the frame;
    probably more effect on dim-room noise than the TNR question in section 5.
 
+   **Done 2026-11-06** (DKMS 1.19, HAL pkgrel 8, autoframe 0.6). Two limits,
+   not one: the driver's read-only `vblank` (patch 0031 makes it writable,
+   frame length at 0x033E under group hold, exposure maximum = frame length
+   − 4), and icamerasrc, which passes the caps framerate to the HAL as an
+   AE range of exactly [30, 30] fps. A new icamerasrc property
+   `fps-range=15~30` (`isp/patches/icamerasrc-fps-range.patch`) sets
+   `CAMERA_AE_TARGET_FPS_RANGE`, which the HAL reads after the framerate;
+   the front relay files pass it. Profile `exposureTimeRange` raised to
+   66666 µs. Verified on hardware in the same room: AE settled at vblank
+   3715 (frame 6355 lines = 66.7 ms), exposure 6351 lines (2× the old cap),
+   loopback at a steady 14.99 fps; gain still at 960, so the room is still
+   dim for the sensor. Against Windows' Camera app in video mode: mean
+   level 113 → 141 (Windows 175), saturation 19 → 33 (Windows 61).
+   Remaining gap is colour: a white wall comes out neutral (189,190,185)
+   where Windows keeps the room's warmth (244,215,182), and saturation is
+   half. Suspect the `.aiqb` LAIQ records the Dec-2025 AIC does not read
+   (versions one step newer, see the hardware ISP plan); not yet checked.
+
 At idle the relays cost nothing measurable (no context switches in 15
 minutes, before or after serving a client), so on-demand starting is not
 needed for power.
