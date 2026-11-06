@@ -198,3 +198,12 @@ Next:
    would over-contrast).
 2. Re-measure the Windows comparison with correctly decoded frames.
 3. AWB warmth: a preference, tune last.
+
+### In the browser (2026-11-06)
+
+`userspace/camera-check` (a local PWA, scripted with headless Chromium) on the
+front ISP camera, 1080p, after AE settled: black level (1st percentile) 8,
+white (99th) 254, saturation 63-64, white wall R/B 1.07. Chromium decodes the
+limited-range stream correctly, and saturation matches Windows (61). The grey
+look was Snapshot only; no source-side change. What is left against Windows
+is white balance warmth (wall R/B 1.07 here, 1.34 on Windows).
