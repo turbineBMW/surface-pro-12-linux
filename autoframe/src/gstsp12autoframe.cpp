@@ -12,6 +12,8 @@
 #include <opencv2/imgproc.hpp>
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -43,6 +45,9 @@ struct State {
     std::vector<sp12::Window> sent;         // windows sent, newest last (for latency mapping)
     sp12::Window last_sent{0, 0, 0, 0};
     int array_w = 3844, array_h = 2640;
+    /* Face-based exposure */
+    GstElement *face_target = nullptr;      // upstream element with a "face-regions" property
+    std::string faces_sent;                 // last "face-regions" value sent
 };
 
 typedef struct _GstSp12AutoFrame {
@@ -60,6 +65,7 @@ typedef struct _GstSp12AutoFrame {
     gint mode;                 /* 0 crop (in the element), 1 isp (zoom-region upstream) */
     gchar *active_array;       /* "WxH" sensor active array, ISP mode */
     gint isp_latency;          /* frames between a zoom-region update and its effect */
+    gboolean face_ae;          /* send faces upstream as face-regions (face-based 3A) */
     /* state */
     State *st;
 } GstSp12AutoFrame;
@@ -87,6 +93,7 @@ enum {
     PROP_MODE,
     PROP_ACTIVE_ARRAY,
     PROP_ISP_LATENCY,
+    PROP_FACE_AE,
 };
 
 enum { MODE_CROP = 0, MODE_ISP = 1 };
@@ -158,6 +165,7 @@ static void gst_sp12_autoframe_set_property(GObject *object, guint prop_id, cons
         break;
     }
     case PROP_ISP_LATENCY: self->isp_latency = g_value_get_int(value); break;
+    case PROP_FACE_AE: self->face_ae = g_value_get_boolean(value); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec); break;
     }
     apply_params(self);
@@ -186,6 +194,7 @@ static void gst_sp12_autoframe_get_property(GObject *object, guint prop_id, GVal
     case PROP_MODE: g_value_set_enum(value, self->mode); break;
     case PROP_ACTIVE_ARRAY: g_value_set_string(value, self->active_array); break;
     case PROP_ISP_LATENCY: g_value_set_int(value, self->isp_latency); break;
+    case PROP_FACE_AE: g_value_set_boolean(value, self->face_ae); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec); break;
     }
     GST_OBJECT_UNLOCK(self);
@@ -194,6 +203,7 @@ static void gst_sp12_autoframe_get_property(GObject *object, guint prop_id, GVal
 static void gst_sp12_autoframe_finalize(GObject *object) {
     GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(object);
     if (self->st->zoom_target) gst_object_unref(self->st->zoom_target);
+    if (self->st->face_target) gst_object_unref(self->st->face_target);
     delete self->st;
     g_free(self->active_array);
     g_free(self->device);
@@ -243,9 +253,10 @@ static GstCaps *gst_sp12_autoframe_fixate_caps(GstBaseTransform *trans, GstPadDi
     return gst_caps_fixate(othercaps);
 }
 
-/* Walk upstream from our sink pad to the first element with a "zoom-region"
- * property (icamerasrc with the sp12 patch), through capsfilters and queues. */
-static void find_zoom_target(GstSp12AutoFrame *self) {
+/* Walk upstream from our sink pad to the first element with property `prop`
+ * (icamerasrc with the sp12 patches), through capsfilters and queues.
+ * Returns a reference, or NULL. */
+static GstElement *find_upstream_with(GstSp12AutoFrame *self, const char *prop) {
     GstPad *pad = GST_PAD(gst_object_ref(GST_BASE_TRANSFORM_SINK_PAD(self)));
     for (int hop = 0; hop < 8 && pad; hop++) {
         GstPad *peer = gst_pad_get_peer(pad);
@@ -255,16 +266,51 @@ static void find_zoom_target(GstSp12AutoFrame *self) {
         GstElement *el = gst_pad_get_parent_element(peer);
         gst_object_unref(peer);
         if (!el) break;
-        if (g_object_class_find_property(G_OBJECT_GET_CLASS(el), "zoom-region")) {
-            self->st->zoom_target = el;  // keep the ref
-            GST_INFO_OBJECT(self, "zoom target: %s", GST_ELEMENT_NAME(el));
-            return;
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(el), prop)) {
+            GST_INFO_OBJECT(self, "%s target: %s", prop, GST_ELEMENT_NAME(el));
+            return el;  // keep the ref
         }
         pad = gst_element_get_static_pad(el, "sink");
         gst_object_unref(el);
     }
     if (pad) gst_object_unref(pad);
-    GST_WARNING_OBJECT(self, "no upstream element with a zoom-region property; ISP mode will not move the window");
+    return nullptr;
+}
+
+static void find_zoom_target(GstSp12AutoFrame *self) {
+    self->st->zoom_target = find_upstream_with(self, "zoom-region");
+    if (!self->st->zoom_target)
+        GST_WARNING_OBJECT(self, "no upstream element with a zoom-region property; ISP mode will not move the window");
+}
+
+/* Hand the faces to the camera HAL for face-based exposure (icamerasrc
+ * "face-regions": "l,t,r,b;..." in sensor active-array pixels). `dets` are in
+ * active-array pixels already in ISP mode; in crop mode they are in input
+ * pixels of a frame that shows the full array width, centre-cropped to the
+ * frame's aspect. Sent only when the (8 px quantised) list changes. */
+static void send_faces(GstSp12AutoFrame *self, bool isp, bool on) {
+    State *st = self->st;
+    if (!st->face_target) return;
+    std::string v;
+    if (on) {
+        const float scale = isp ? 1.f : (float)st->array_w / st->in_w;
+        const float oy = isp ? 0.f : (st->array_h - st->in_h * scale) / 2;
+        int n = 0;
+        for (const auto &d : st->dets) {
+            if (n++ == 4) break;
+            int l = (int)std::lround(d.x * scale), t = (int)std::lround(oy + d.y * scale);
+            int r = (int)std::lround((d.x + d.w) * scale), b = (int)std::lround(oy + (d.y + d.h) * scale);
+            l = std::clamp(l, 0, st->array_w) & ~7; t = std::clamp(t, 0, st->array_h) & ~7;
+            r = std::clamp(r, 0, st->array_w) & ~7; b = std::clamp(b, 0, st->array_h) & ~7;
+            if (r <= l || b <= t) continue;
+            char buf[64];
+            g_snprintf(buf, sizeof buf, "%s%d,%d,%d,%d", v.empty() ? "" : ";", l, t, r, b);
+            v += buf;
+        }
+    }
+    if (v == st->faces_sent) return;
+    st->faces_sent = v;
+    g_object_set(st->face_target, "face-regions", v.c_str(), NULL);
 }
 
 static gboolean gst_sp12_autoframe_set_info(GstVideoFilter *filter, GstCaps *incaps, GstVideoInfo *in_info,
@@ -299,6 +345,11 @@ static gboolean gst_sp12_autoframe_set_info(GstVideoFilter *filter, GstCaps *inc
     st->last_sent = {0, 0, 0, 0};
     st->last_pts = GST_CLOCK_TIME_NONE;
     if (isp && !st->zoom_target) find_zoom_target(self);
+    if (!st->face_target) {
+        st->face_target = find_upstream_with(self, "face-regions");
+        if (!st->face_target) GST_INFO_OBJECT(self, "no upstream face-regions property: no face-based exposure");
+    }
+    st->faces_sent = "";
     GST_INFO_OBJECT(self, "%s mode: in %dx%d -> out %dx%d, window space %dx%d, full window %.0f px wide, max zoom %.2f%s",
                     isp ? "isp" : "crop", st->in_w, st->in_h, st->out_w, st->out_h, isp ? st->array_w : st->in_w,
                     isp ? st->array_h : st->in_h, st->ctl.current().w, self->max_zoom,
@@ -341,6 +392,8 @@ static gboolean gst_sp12_autoframe_start(GstBaseTransform *trans) {
 
 static gboolean gst_sp12_autoframe_stop(GstBaseTransform *trans) {
     GstSp12AutoFrame *self = GST_SP12_AUTOFRAME(trans);
+    /* The HAL keeps the last faces; leave none behind for the next session. */
+    send_faces(self, false, false);
     self->st->det.reset();
     return TRUE;
 }
@@ -381,6 +434,8 @@ static void poll_control_file(GstSp12AutoFrame *self) {
                 g_object_set(self, "speed", g_ascii_strtod(line + 6, nullptr), NULL);
             } else if (g_str_has_prefix(line, "hold-time=")) {
                 g_object_set(self, "hold-time", g_ascii_strtod(line + 10, nullptr), NULL);
+            } else if (g_str_has_prefix(line, "face-ae=")) {
+                g_object_set(self, "face-ae", g_strcmp0(line + 8, "1") == 0 || g_strcmp0(line + 8, "true") == 0, NULL);
             } else if (g_str_has_prefix(line, "draw-boxes=")) {
                 g_object_set(self, "draw-boxes", g_strcmp0(line + 11, "1") == 0 || g_strcmp0(line + 11, "true") == 0, NULL);
             }
@@ -435,6 +490,7 @@ static sp12::Window frame_step(GstSp12AutoFrame *self, GstVideoFrame *in, gint64
     int interval = self->detect_interval > 0 ? self->detect_interval : 1;
     const bool isp = self->mode == MODE_ISP;
     const int latency = self->isp_latency;
+    const bool face_ae = self->face_ae;
     GST_OBJECT_UNLOCK(self);
 
     const int iw = GST_VIDEO_FRAME_WIDTH(in), ih = GST_VIDEO_FRAME_HEIGHT(in);
@@ -442,7 +498,10 @@ static sp12::Window frame_step(GstSp12AutoFrame *self, GstVideoFrame *in, gint64
     cv::Mat uv_in(ih / 2, iw / 2, CV_8UC2, GST_VIDEO_FRAME_PLANE_DATA(in, 1), GST_VIDEO_FRAME_PLANE_STRIDE(in, 1));
 
     gint64 t0 = g_get_monotonic_time();
-    if (enabled && st->det && st->frame_no % interval == 0) {
+    /* Detect for framing, and for face-based exposure even with framing off
+     * (the controller ignores the faces then). */
+    const bool detect_now = (enabled || face_ae) && st->det && st->frame_no % interval == 0;
+    if (detect_now) {
         run_detector(self, y_in, uv_in);
         if (isp) {
             /* The frame shows the window sent `latency` frames ago; map the
@@ -457,6 +516,9 @@ static sp12::Window frame_step(GstSp12AutoFrame *self, GstVideoFrame *in, gint64
                 d.x = w.x + d.x * sx; d.w *= sx; d.y = w.y + d.y * sy; d.h *= sy;
             }
         }
+        send_faces(self, isp, face_ae);
+    } else if (!face_ae) {
+        send_faces(self, isp, false);  // switched off: clear the HAL's faces once
     }
     *t_det_us = g_get_monotonic_time() - t0;
 
@@ -626,6 +688,8 @@ static void gst_sp12_autoframe_class_init(GstSp12AutoFrameClass *klass) {
         g_param_spec_string("active-array", "Active array", "Sensor active array WxH, the zoom-region coordinate space (ISP mode)", "3844x2640", flags));
     g_object_class_install_property(gobject_class, PROP_ISP_LATENCY,
         g_param_spec_int("isp-latency", "ISP latency", "Frames between sending a zoom-region and seeing it in the output (ISP mode)", 0, 30, 2, flags));
+    g_object_class_install_property(gobject_class, PROP_FACE_AE,
+        g_param_spec_boolean("face-ae", "Face AE", "Send detected faces upstream as icamerasrc face-regions, for face-based exposure (also with framing off)", TRUE, flags));
 
     gst_element_class_set_static_metadata(element_class, "Surface Pro 12 automatic framing", "Filter/Effect/Video",
         "Crops and scales NV12 video to follow faces (YuNet on the NPU through OpenVINO)",
@@ -660,6 +724,7 @@ static void gst_sp12_autoframe_init(GstSp12AutoFrame *self) {
     self->mode = MODE_CROP;
     self->active_array = g_strdup("3844x2640");
     self->isp_latency = 2;
+    self->face_ae = TRUE;
     self->st = new State();
     apply_params(self);
     gst_base_transform_set_passthrough(GST_BASE_TRANSFORM(self), FALSE);

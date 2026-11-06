@@ -26,7 +26,9 @@ path, kept for hardware without the patched HAL).
   size, NV12 out at the negotiated size). Properties: `enable`, `device`
   (NPU, falls back to GPU, CPU), `model`, `det-width`/`det-height`,
   `max-zoom`, `face-frac`, `headroom`, `speed`, `hold-time`, `group`,
-  `detect-interval`, `control-file`, `draw-boxes`.
+  `detect-interval`, `control-file`, `draw-boxes`, `face-ae` (send the
+  faces upstream as icamerasrc `face-regions` for face-based exposure, also
+  with framing off; needs sp12-camera-hal 2025.12.10-10).
 - `src/framing.h`: the controller (target box, dead zone, critically damped
   spring, presence hysteresis, hold). `proto/framing.py` is the same thing in
   Python; keep them in step.
@@ -62,7 +64,7 @@ path, kept for hardware without the patched HAL).
   sp12.autoframe open|close|toggle` summons it.
 - `../userspace/usr/local/bin/sp12-autoframe`: user-side control
   (`auto|off|toggle|status|restore`, `--face F`, `--zoom N`, `--headroom H`,
-  `--speed S`, `--hold T`, `--boxes on|off`) through `/run/sp12/autoframe`,
+  `--speed S`, `--hold T`, `--boxes on|off`, `--face-ae on|off`) through `/run/sp12/autoframe`,
   re-read by the element within a second, and saved to
   `~/.config/sp12/autoframe.conf`.
 

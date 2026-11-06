@@ -1,0 +1,224 @@
+Accept faces from an external detector for face-based 3A
+
+The AIQ takes face rectangles for face-weighted exposure, but only
+Intel's PVL detector fills them and the Linux release does not ship it;
+and isFaceAeEnabled() also requires an advertised face detect mode,
+which would add the HAL's own face stream for that missing detector.
+
+Add Parameters::setFaceRegions / getFaceRegions
+(CAMERA_STATISTICS_FACE_RECTANGLES, active-array pixels) and
+PlatformData::isExternalFaceAeEnabled() (the profile's "faceAeEnabled"
+alone). In CameraHal::setParameters, convert the faces to IA
+coordinates and store them in AiqResultStorage the way
+FaceDetectionPVL does, marked as a CenterNet detector (what the Windows
+stack reports for its own); AiqEngine passes them to the AIQ when either
+check is true.
+
+Surface Pro 12 (Intel), sp12-camera-hal.
+
+diff --git i/include/api/Parameters.h w/include/api/Parameters.h
+index fb2b19c..3bae6bf 100644
+--- i/include/api/Parameters.h
++++ w/include/api/Parameters.h
+@@ -1555,6 +1555,28 @@ class Parameters {
+      */
+     int getZoomRegion(camera_zoom_region_t* region) const;
+ 
++    /**
++     * \brief Set faces found by an external detector, for face-based 3A
++     *
++     * Each face is 4 values {left, top, right, bottom} in sensor active-array
++     * pixels. An empty list clears the faces. Used only when the sensor
++     * profile sets "faceAeEnabled".
++     *
++     * \param[in] rects the face rectangles, 4 values per face
++     *
++     * \return 0 if set successfully, otherwise non-0 value is returned.
++     */
++    int setFaceRegions(const std::vector<int32_t>& rects);
++
++    /**
++     * \brief Get the faces set by setFaceRegions()
++     *
++     * \param[out] rects the face rectangles, 4 values per face (none: empty)
++     *
++     * \return 0 if faces were set (possibly none), NAME_NOT_FOUND otherwise.
++     */
++    int getFaceRegions(std::vector<int32_t>& rects) const;
++
+  private:
+     friend class ParameterHelper;
+     void* mData;  // The internal data to save the all of the parameters.
+diff --git i/src/3a/AiqEngine.cpp w/src/3a/AiqEngine.cpp
+index a2e348f..6d2513c 100644
+--- i/src/3a/AiqEngine.cpp
++++ w/src/3a/AiqEngine.cpp
+@@ -156,7 +156,8 @@ int AiqEngine::prepareStatsParams(const aiq_parameter_t& aiqParams,
+     LOG2("%s, sequence %ld", __func__, aiqStatistics->mSequence);
+ 
+     // update face detection related parameters
+-    if (PlatformData::isFaceAeEnabled(mCameraId)) {
++    if (PlatformData::isFaceAeEnabled(mCameraId) ||
++        PlatformData::isExternalFaceAeEnabled(mCameraId)) {
+         FaceDetectionResult* faceResult = mAiqResultStorage->getFaceResult();
+         if ((faceResult != nullptr) && (faceResult->ccaFaceState.num_faces > 0U)) {
+             statsParams->faces = faceResult->ccaFaceState;
+diff --git i/src/hal/CameraHal.cpp w/src/hal/CameraHal.cpp
+index 7d79fb3..5c66308 100644
+--- i/src/hal/CameraHal.cpp
++++ w/src/hal/CameraHal.cpp
+@@ -24,6 +24,9 @@
+ #include "Parameters.h"
+ #include "PlatformData.h"
+ #include "ParameterConvert.h"
++#include "AiqResultStorage.h"
++#include "AiqUtils.h"
++#include "CameraContext.h"
+ #include "iutils/CameraLog.h"
+ 
+ namespace icamera {
+@@ -365,11 +368,67 @@ int CameraHal::getParameters(int cameraId, Parameters& param, int64_t sequence)
+     return OK;
+ }
+ 
++/*
++ * Faces found outside the HAL (Parameters::setFaceRegions, in active-array
++ * pixels), handed to 3A as the PVL face detector would hand its own: the
++ * Linux release has no detector, so face-based AE otherwise never runs.
++ * Only faces in this call's parameters count, so a stale list is not
++ * re-applied with every later parameter change.
++ */
++static void updateExternalFaces(int cameraId, const Parameters& param) {
++    std::vector<int32_t> rects;
++    if (!PlatformData::isExternalFaceAeEnabled(cameraId) || (param.getFaceRegions(rects) != OK)) {
++        return;
++    }
++
++    auto staticMetadata = PlatformData::getStaticMetadata(cameraId);
++    auto it = staticMetadata->mInt32Metadata.find("sensor.info.activeArraySize");
++    if ((it == staticMetadata->mInt32Metadata.end()) || (it->second.size() < 4U)) {
++        LOGW("<id%d> @%s: no active array size, faces ignored", cameraId, __func__);
++        return;
++    }
++    const std::vector<int32_t>& a = it->second;
++    const camera_coordinate_system_t activeArray = {a[0], a[1], a[0] + a[2], a[1] + a[3]};
++
++    auto aiqResultStorage = CameraContext::getInstance(cameraId)->getAiqResultStorage();
++    FaceDetectionResult* buf = aiqResultStorage->acquireFaceResult();
++    CLEAR(*buf);
++    buf->ccaFaceState.updated = true;
++    buf->ccaFaceState.is_video_conf = true;
++    // What the Windows stack reports for its own detector (centernet_tracking).
++    buf->ccaFaceState.fd_algo = CENTERNET_FD;
++
++    uint32_t num = 0U;
++    for (size_t i = 0U; (i + 3U < rects.size()) && (num < MAX_FACES_DETECTABLE); i += 4U) {
++        const camera_coordinate_t lt =
++            AiqUtils::convertToIaCoordinate(activeArray, {rects[i], rects[i + 1]});
++        const camera_coordinate_t rb =
++            AiqUtils::convertToIaCoordinate(activeArray, {rects[i + 2], rects[i + 3]});
++        ia_atbx_face& face = buf->ccaFaceState.faces[num];
++        face.face_area.left = lt.x;
++        face.face_area.top = lt.y;
++        face.face_area.right = rb.x;
++        face.face_area.bottom = rb.y;
++        face.tracking_id = static_cast<int32_t>(num);
++        face.confidence = 100;
++        face.person_id = -1;
++        LOG2("<id%d> @%s: face %u at %d,%d,%d,%d (IA)", cameraId, __func__, num,
++             face.face_area.left, face.face_area.top, face.face_area.right,
++             face.face_area.bottom);
++        num++;
++    }
++    buf->ccaFaceState.num_faces = num;
++
++    static int64_t sFaceSequence = 0;
++    aiqResultStorage->updateFaceResult(++sFaceSequence);
++}
++
+ int CameraHal::setParameters(int cameraId, const Parameters& param) {
+     LOG2("<id%d> @%s", cameraId, __func__);
+     CameraDevice* device = mCameraDevices[cameraId];
+     checkCameraDevice(device, BAD_VALUE);
+ 
++    updateExternalFaces(cameraId, param);
+     mParameters[cameraId].merge(param);
+ 
+     DataContext dataContext(cameraId);
+diff --git i/src/metadata/Parameters.cpp w/src/metadata/Parameters.cpp
+index dbb168c..0e7b73b 100644
+--- i/src/metadata/Parameters.cpp
++++ w/src/metadata/Parameters.cpp
+@@ -1672,6 +1672,35 @@ int Parameters::setZoomRegion(const camera_zoom_region_t& region) {
+     return ParameterHelper::getMetadata(mData).update(INTEL_CONTROL_SCALER_CROP_REGION, values, 4);
+ }
+ 
++// Stored as CAMERA_STATISTICS_FACE_RECTANGLES; "no faces" is one empty rectangle
++// so that the entry always has a payload.
++int Parameters::setFaceRegions(const std::vector<int32_t>& rects) {
++    ParameterHelper::AutoWLock wl(mData);
++    if (rects.size() < 4U) {
++        const int32_t none[4] = {0, 0, 0, 0};
++        return ParameterHelper::getMetadata(mData).update(CAMERA_STATISTICS_FACE_RECTANGLES, none,
++                                                          4);
++    }
++    return ParameterHelper::getMetadata(mData).update(CAMERA_STATISTICS_FACE_RECTANGLES,
++                                                      rects.data(), rects.size() / 4U * 4U);
++}
++
++int Parameters::getFaceRegions(std::vector<int32_t>& rects) const {
++    ParameterHelper::AutoRLock rl(mData);
++    auto entry = ParameterHelper::getMetadataEntry(mData, CAMERA_STATISTICS_FACE_RECTANGLES);
++    if ((entry.count == 0) || ((entry.count % 4) != 0)) {
++        return NAME_NOT_FOUND;
++    }
++    rects.clear();
++    for (size_t i = 0U; i < entry.count; i += 4U) {
++        const int32_t* r = &entry.data.i32[i];
++        if ((r[2] > r[0]) && (r[3] > r[1])) {
++            rects.insert(rects.end(), r, r + 4);
++        }
++    }
++    return OK;
++}
++
+ int Parameters::getZoomRegion(camera_zoom_region_t* region) const {
+     ParameterHelper::AutoRLock rl(mData);
+     auto entry = ParameterHelper::getMetadataEntry(mData, INTEL_CONTROL_SCALER_CROP_REGION);
+diff --git i/src/platformdata/PlatformData.cpp w/src/platformdata/PlatformData.cpp
+index 32d79c4..d202e59 100644
+--- i/src/platformdata/PlatformData.cpp
++++ w/src/platformdata/PlatformData.cpp
+@@ -233,6 +233,10 @@ bool PlatformData::isFaceDetectionSupported(int cameraId) {
+     return false;
+ }
+ 
++bool PlatformData::isExternalFaceAeEnabled(int cameraId) {
++    return getInstance()->mStaticCfg.mCameras[cameraId].mFaceAeEnabled;
++}
++
+ bool PlatformData::isFaceAeEnabled(int cameraId) {
+     return (isFaceDetectionSupported(cameraId) &&
+             getInstance()->mStaticCfg.mCameras[cameraId].mFaceAeEnabled);
+diff --git i/src/platformdata/PlatformData.h w/src/platformdata/PlatformData.h
+index 5850fc8..6d8e89c 100644
+--- i/src/platformdata/PlatformData.h
++++ w/src/platformdata/PlatformData.h
+@@ -740,6 +740,17 @@ class PlatformData {
+      */
+     static bool isFaceAeEnabled(int cameraId);
+ 
++    /**
++     * Face AE from faces an external detector sets (Parameters::setFaceRegions).
++     * Only "faceAeEnabled": isFaceAeEnabled() also needs a face detect mode
++     * advertised, which adds the HAL's own face stream for a detector the
++     * Linux release lacks.
++     *
++     * \param cameraId: [0, MAX_CAMERA_NUMBER - 1]
++     * \return if external face AE is enabled or not.
++     */
++    static bool isExternalFaceAeEnabled(int cameraId);
++
+     /**
+      * get face engine's vendor
+      *

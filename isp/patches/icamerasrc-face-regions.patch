@@ -1,0 +1,83 @@
+Add a face-regions property (faces from an external detector)
+
+"l,t,r,b;l,t,r,b..." in sensor active-array pixels, empty for none, set
+while streaming. It goes to Parameters::setFaceRegions (sp12 HAL patch
+hal-face-regions), which hands the faces to 3A for face-based exposure
+the way Intel's PVL detector would; the Linux release has no detector.
+sp12autoframe writes it from its YuNet detections.
+
+Surface Pro 12 (Intel), sp12-camera-hal.
+
+diff --git i/src/gstcamerasrc.cpp w/src/gstcamerasrc.cpp
+index 61683e5..b64f4c0 100644
+--- i/src/gstcamerasrc.cpp
++++ w/src/gstcamerasrc.cpp
+@@ -154,6 +154,7 @@ enum
+   PROP_INPUT_HEIGHT,
+   PROP_ISP_CONTROL,
+   PROP_FISHEYE_DEWARPING_MODE,
++  PROP_FACE_REGIONS,
+   PROP_LTM_TUNING_DATA,
+   PROP_CROP,
+   PROP_CROP_X,
+@@ -1165,6 +1166,11 @@ gst_camerasrc_class_init (GstcamerasrcClass * klass)
+       g_param_spec_enum("fisheye-dewarping-mode","fisheye dewarpingmode","The fisheye dewarping mode used in the LDC correction",
+           gst_camerasrc_fisheye_dewarping_mode_get_type(), DEFAULT_PROP_FISHEYE_DEWARPING_MODE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+ 
++  g_object_class_install_property (gobject_class, PROP_FACE_REGIONS,
++      g_param_spec_string("face-regions","Face regions",
++        "Faces from an external detector for face-based 3A, \"l,t,r,b;l,t,r,b...\" in sensor active-array pixels; empty: no faces. Needs \"faceAeEnabled\" in the sensor profile. Changes apply while streaming.",
++        "", (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
++
+   g_object_class_install_property (gobject_class, PROP_INPUT_FORMAT,
+       g_param_spec_string("input-format","Input format","The format used for input system",
+         DEFAULT_PROP_INPUT_FORMAT, (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+@@ -1944,6 +1950,25 @@ gst_camerasrc_set_property (GObject * object, guint prop_id,
+       src->param->updateDebugLevel();
+       src->debugLevel = g_value_get_int (value);
+       break;
++    case PROP_FACE_REGIONS: {
++      const gchar *str = g_value_get_string(value);
++      std::vector<int32_t> rects;
++      gchar **faces = g_strsplit(str ? str : "", ";", -1);
++      for (gchar **f = faces; *f; f++) {
++        int l, t, r, b;
++        if (**f == '\0')
++          continue;
++        if (sscanf(*f, "%d,%d,%d,%d", &l, &t, &r, &b) != 4 || r <= l || b <= t) {
++          GST_WARNING_OBJECT(src, "face-regions: bad face \"%s\" (expected l,t,r,b)", *f);
++          continue;
++        }
++        rects.insert(rects.end(), {l, t, r, b});
++      }
++      g_strfreev(faces);
++      g_strlcpy(src->face_regions, str ? str : "", sizeof(src->face_regions));
++      src->param->setFaceRegions(rects);
++      break;
++    }
+     case PROP_SHARPNESS:
+       src->param->getImageEnhancement(img_enhancement);
+       img_enhancement.sharpness = g_value_get_int (value);
+@@ -2275,6 +2300,9 @@ gst_camerasrc_get_property (GObject * object, guint prop_id,
+     case PROP_DEBUG_LEVEL:
+       g_value_set_int(value, src->debugLevel);
+       break;
++    case PROP_FACE_REGIONS:
++      g_value_set_string(value, src->face_regions);
++      break;
+     case PROP_SHARPNESS:
+       g_value_set_int (value, src->man_ctl.sharpness);
+       break;
+diff --git i/src/gstcamerasrc.h w/src/gstcamerasrc.h
+index 508a405..d9c22fc 100644
+--- i/src/gstcamerasrc.h
++++ w/src/gstcamerasrc.h
+@@ -534,6 +534,8 @@ struct _Gstcamerasrc
+   int run_3a_cadence;
+   int video_stabilization_mode;
+   int fisheye_dewarping_mode;
++  /* external faces, "l,t,r,b;..." in active-array pixels (face-regions) */
++  gchar face_regions[256];
+   int buffer_usage;
+   int src_stream_usage;
+   guint number_of_buffers;

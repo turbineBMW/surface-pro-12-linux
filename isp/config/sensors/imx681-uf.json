@@ -187,6 +187,8 @@
         "iSysRawFormat": "V4L2_PIX_FMT_SRGGB10",
         "maxRawDataNum": 32,
         "initialSkipFrame": 0,
+        // Face-weighted 3A from the faces sp12autoframe sends (icamerasrc face-regions).
+        "faceAeEnabled": true,
         "exposureLag":  2,
         "gainLag": 2,
         "digitalGainLag": 0,
