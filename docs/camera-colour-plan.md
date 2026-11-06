@@ -148,3 +148,53 @@ Plan:
 5. A/B against the packaged stack: white wall, face, saturation, plus the
    Windows video screenshot. Package only if it wins.
 
+### Result (2026-11-06): no colour change; the grey look is a range bug downstream
+
+Done: worktrees `work/{hal,bins,icamerasrc}-2609`; all six HAL patches apply
+to `30ad691` as they are, plus `isp/patches-2609/hal-no-boot-install.patch`
+(the release installs sensor `*.img` to an absolute `/boot`).
+`isp/tools/graph-to-2609.py` converts our e5172cc graph files to the new
+layout (header 16 -> 40, graph header 116 -> 120 with `isIsysUnpacked = 1`,
+`numberOfActualLinks`, LBFF `bxt_blc` 5 -> 6 and `b2i_ds_1_1` 5 -> 12 with
+the new system API uuids 9649/51813 and `scaling_ratio = 0`, new hashes; values
+checked against Intel's 2026-09 OV13B10/OV08X40 graphs). The 2026-09
+`check-graph` resolves 968/968 IMX681 and 801/801 OV13858 settings.
+`isp/build-dev.sh` takes `HAL`, `BINS`, `ICAMERASRC`, `BUILD`, `PREFIX`,
+`GRAPHS`, `EXTRA_PATCHES`. The 2026-09 stack streams on the current firmware
+with no new errors.
+
+A/B, same scene, direct icamerasrc 1080p, 90 frames each, fresh AIQD, last
+frame decoded as limited range:
+
+| | package (Dec-2025) | 2026-09 |
+|---|---|---|
+| Mean level | 144.8 | 145.2 |
+| Saturation (HSL) | 60.5 | 61.7 |
+| Wall R,G,B | 211, 217, 202 | 212, 216, 202 |
+| Face R,G,B | 96, 70, 77 | 95, 68, 76 |
+
+No measurable difference: the newer AIQ does not change the rendering. Not
+worth packaging for colour.
+
+**The real finding.** Decoded correctly (limited range), the HAL output already
+has the Windows saturation (60.5 vs 61). Decoded as *full* range it drops to
+~40 with blacks at 12-14. The Snapshot photos show exactly that signature:
+luma 1st percentile 16-20, 99th 193-222, where the correctly decoded HAL frame
+spans 0-1 to 238-255. The platform is right: the loopback reports Rec. 709 /
+ITU-R 601 / limited quantisation, `v4l2src` and `pipewiresrc` negotiate
+`colorimetry=2:4:7:1`, and the PipeWire node advertises `colorRange 16-235`.
+The error is in the app's rendering or saving (Snapshot 51, GTK 4.24,
+gtk4paintablesink 0.15.4). Earlier "Linux" numbers that went through Snapshot
+or `v4l2src ! jpegenc` understate saturation and contrast for the same reason.
+
+Remaining real difference: white balance (our wall stays neutral/greenish,
+Windows keeps the room warm).
+
+Next:
+1. Check what the apps that matter show live (Snapshot preview, the browser
+   via getUserMedia) and decide where to fix: in the app (report upstream),
+   or at the source (full-range output declared full range, which apps that
+   ignore the flag would then show correctly, but apps that assume limited
+   would over-contrast).
+2. Re-measure the Windows comparison with correctly decoded frames.
+3. AWB warmth: a preference, tune last.

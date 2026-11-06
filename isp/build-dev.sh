@@ -10,47 +10,63 @@
 # private/camera/psys/out/linux the converted graph files (tools/
 # stamp-hashes.py then tools/linuxize-100002). Re-runnable: patches apply
 # with --forward, cmake and make are incremental.
+#
+# Another release goes through the environment, e.g. the 2026-09 one
+# (docs/camera-colour-plan.md):
+#   HAL=$W/hal-2609 BINS=$W/bins-2609 ICAMERASRC=$W/icamerasrc-2609 \
+#   BUILD=$W/build-2609 PREFIX=$W/prefix-2609 \
+#   GRAPHS=private/camera/psys/out/linux-2609 EXTRA_PATCHES=isp/patches-2609 \
+#   isp/build-dev.sh
 set -euo pipefail
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(dirname "$HERE")
 W=$REPO/private/camera/psys/work
 PREFIX=${PREFIX:-$W/prefix}
+HAL=${HAL:-$W/hal}
+BINS=${BINS:-$W/bins}
+ICAMERASRC=${ICAMERASRC:-$W/icamerasrc}
+BUILD=${BUILD:-$W/build}
 WIN=$REPO/private/windows/drivers
-GRAPHS=$REPO/private/camera/psys/out/linux
+GRAPHS=$(readlink -f "${GRAPHS:-$REPO/private/camera/psys/out/linux}")
 
-mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include"
+mkdir -p "$PREFIX/lib/pkgconfig" "$PREFIX/include" "$BUILD"
 export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig
 
 # Closed-source libraries (ipu75xa only).
-cp -a "$W"/bins/lib/*ipu75xa* "$PREFIX/lib/"
-cp -a "$W/bins/include/ipu75xa" "$PREFIX/include/"
-sed "s#^prefix=.*#prefix=$PREFIX#" "$W/bins/lib/pkgconfig/ia_imaging-ipu75xa.pc" \
+cp -a "$BINS"/lib/*ipu75xa* "$PREFIX/lib/"
+cp -a "$BINS/include/ipu75xa" "$PREFIX/include/"
+sed "s#^prefix=.*#prefix=$PREFIX#" "$BINS/lib/pkgconfig/ia_imaging-ipu75xa.pc" \
 	> "$PREFIX/lib/pkgconfig/ia_imaging-ipu75xa.pc"
 
-# HAL: AIC input timestamp (Marco Glauser), Arch jsoncpp include path (AUR).
-for p in hal-aic-timestamp.patch hal-arch-jsoncpp.patch hal-sensor-orientation.patch hal-zoom-region.patch; do
-	patch -d "$W/hal" -p1 --forward --batch -s < "$HERE/patches/$p" || true
+# The same patches as the package (isp/patches, in glob order).
+for p in "$HERE"/patches/hal-*.patch; do
+	patch -d "$HAL" -p1 --forward --batch -s < "$p" || true
 done
-# icamerasrc: zoom-region property (the ISP-side crop for automatic framing).
-for p in icamerasrc-zoom-region.patch; do
-	patch -d "$W/icamerasrc" -p1 --forward --batch -s < "$HERE/patches/$p" || true
+# Release-specific HAL patches (e.g. EXTRA_PATCHES=isp/patches-2609).
+if [[ -n ${EXTRA_PATCHES:-} ]]; then
+	for p in "$EXTRA_PATCHES"/hal-*.patch; do
+		patch -d "$HAL" -p1 --forward --batch -s < "$p" || true
+	done
+fi
+for p in "$HERE"/patches/icamerasrc-*.patch; do
+	patch -d "$ICAMERASRC" -p1 --forward --batch -s < "$p" || true
 done
-cmake -S "$W/hal" -B "$W/build/hal" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+cmake -S "$HAL" -B "$BUILD/hal" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
 	-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
 	-DCMAKE_INSTALL_SYSCONFDIR="$PREFIX/etc" \
 	-DBUILD_CAMHAL_ADAPTOR=ON -DBUILD_CAMHAL_PLUGIN=ON -DIPU_VERSIONS=ipu75xa \
-	-DUSE_STATIC_GRAPH=ON -DUSE_STATIC_GRAPH_AUTOGEN=ON > "$W/hal-cmake.log"
-make -C "$W/build/hal" -j"$(nproc)" > "$W/hal-make.log" 2>&1
-make -C "$W/build/hal" install > /dev/null
+	-DUSE_STATIC_GRAPH=ON -DUSE_STATIC_GRAPH_AUTOGEN=ON > "$BUILD/hal-cmake.log"
+make -C "$BUILD/hal" -j"$(nproc)" > "$BUILD/hal-make.log" 2>&1
+make -C "$BUILD/hal" install > /dev/null
 
 # icamerasrc (slim camhal API), out of tree.
-if [[ ! -f $W/icamerasrc/configure ]]; then
-	(cd "$W/icamerasrc" && autoreconf --force --install --make > "$W/icamerasrc-autoreconf.log" 2>&1)
+if [[ ! -f $ICAMERASRC/configure ]]; then
+	(cd "$ICAMERASRC" && autoreconf --force --install --make > "$BUILD/icamerasrc-autoreconf.log" 2>&1)
 fi
-mkdir -p "$W/build/icamerasrc"
-(cd "$W/build/icamerasrc" && export CHROME_SLIM_CAMHAL=ON &&
-	"$W/icamerasrc/configure" --prefix="$PREFIX" > "$W/icamerasrc-configure.log" 2>&1 &&
-	make -j"$(nproc)" > "$W/icamerasrc-make.log" 2>&1 && make install > /dev/null)
+mkdir -p "$BUILD/icamerasrc"
+(cd "$BUILD/icamerasrc" && export CHROME_SLIM_CAMHAL=ON &&
+	"$ICAMERASRC/configure" --prefix="$PREFIX" > "$BUILD/icamerasrc-configure.log" 2>&1 &&
+	make -j"$(nproc)" > "$BUILD/icamerasrc-make.log" 2>&1 && make install > /dev/null)
 
 # Surface Pro 12 configuration.
 C=$PREFIX/etc/camera/ipu75xa
