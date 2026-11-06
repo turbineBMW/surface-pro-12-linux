@@ -207,3 +207,29 @@ white (99th) 254, saturation 63-64, white wall R/B 1.07. Chromium decodes the
 limited-range stream correctly, and saturation matches Windows (61). The grey
 look was Snapshot only; no source-side change. What is left against Windows
 is white balance warmth (wall R/B 1.07 here, 1.34 on Windows).
+
+### Face skin type and white balance (2026-11-06): no effect
+
+Intel's CCAT has face-based white balance (`ia_ccat_set_wb_face_based`,
+`awb_face_status`) and per-project switches in `ccat_project_adaption_bitmap`
+(bit 1 "wb face_base", bit 6 "wfov skin tone alignment"); nothing in the HAL
+sets that bitmap, so it would come from the tuning, which Windows and we
+share. The faces we pass carry no skin data (`skin_type_validity` 0), where
+the Windows tracker estimates a skin tone. Experiment (dev prefix only, hook
+removed again): relay-style pipeline, faces from sp12autoframe, framing off,
+three back-to-back runs with the skin fields unset, light (0) and dark (100):
+
+| | none | light | dark |
+|---|---|---|---|
+| Wall R/B | 1.057 | 1.050 | 1.065 |
+| Face R,G,B | 131, 97, 94 | 129, 97, 93 | 128, 95, 92 |
+
+Within noise: AWB does not use the skin fields here. Not pursued.
+
+Note: in the dev prefixes always re-run `isp/build-dev.sh`; a bare
+`make install` reinstalls Intel's config over ours (sensor list and profiles)
+and the HAL then reports "No sensors available".
+
+Open: the Windows numbers were taken at a different time (08:00) and partly
+on a different wall; a fair warmth comparison needs Windows and Linux
+measured back to back under the same lights.
