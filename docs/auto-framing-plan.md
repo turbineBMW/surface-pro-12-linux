@@ -348,6 +348,12 @@ sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
    half. Suspect the `.aiqb` LAIQ records the Dec-2025 AIC does not read
    (versions one step newer, see the hardware ISP plan); not yet checked.
 
+   **Rear camera (2026-11-06, HAL pkgrel 11):** the OV13858 driver's vblank
+   was already writable (408..29961), so only the relay (`fps-range=15~30`)
+   and the profile (66666 µs) changed. In a lit room AE already ran the frame
+   a little past 30 fps length (vblank 458) with exposure at the new maximum
+   (3256 lines) and analogue gain 368 of 8191.
+
 At idle the relays cost nothing measurable (no context switches in 15
 minutes, before or after serving a client), so on-demand starting is not
 needed for power.
