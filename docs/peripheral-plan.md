@@ -1095,6 +1095,23 @@ cameras, IR, face unlock and the snoop fix all work.**
     needed BlueZ/kernel Bluetooth changes the Linux Bluetooth maintainers
     weren't keen on, and the SP11 and SP12 should behave the same. Pairing
     stays manual (`sp12-pen-pair`), as on the SP11.
+  - **The pen does not wake the system** (tools 1.34, 2026-11-06). BlueZ marks
+    every HID device WakeAllowed, so DKMS `0026` kept the pen's link up over
+    suspend next to the keyboard's, and with the lid closed the tablet woke every
+    30-60 s. Logind suspends again after its 30 s lid holdoff, so it looped: on
+    2026-11-05 a closed lid gave 11 cycles in 11 minutes, then a hang on the 11th
+    suspend (black screen, no wake, battery flat by morning). A/B with
+    `pm_debug_messages`, Flex Keyboard attached, pen connected, lid closed:
+    - pen WakeAllowed off: one suspend, 232 s, until the lid opened (1 link kept);
+    - pen WakeAllowed on: 23 wakes in 23 minutes. 19 were IRQ 14 (Intel GPIO)
+      through `ssam_wakeup`, i.e. an EC event (the SSAM driver logs "dropping
+      unexpected command message" at each), and 4 were the Bluetooth controller
+      itself (ACPI GPE, BlueZ wake event 0x3). The touchscreen digitizer, on the
+      same GPIO controller, logged no wakeups.
+    Which EC event the awake pen causes is not known (a guess: charge status
+    from the pen holder relayed by the keyboard). `sp12-pen-pair` now runs
+    `bluetoothctl wake <pen> off` after pairing: the pen's link drops at suspend
+    and a click reconnects it after resume. The keyboard keeps WakeAllowed.
 - The upstream submissions under Post-work. `0008` is committed in `~/Projects/linux-tabletsw`
   and waits for the user's sign-off.
 

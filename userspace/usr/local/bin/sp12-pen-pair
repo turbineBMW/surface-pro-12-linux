@@ -283,6 +283,11 @@ def pair(pairable):
                 print('A pen that is paired with another computer nearby may have connected there instead.')
             return 1
         run('bluetoothctl', 'trust', addr)
+        # BlueZ lets every HID device wake the host, and sp12-modules keeps
+        # links to such devices up over suspend. The pen talks often enough to
+        # wake a closed laptop again and again, so it does not get to wake it:
+        # its link drops at suspend, and a click reconnects it after resume.
+        run('bluetoothctl', 'wake', addr, 'off')
         # Privacy goes back off (a radio power cycle) only once the buttons
         # are set up.
         print("Setting up the pen's buttons...")
