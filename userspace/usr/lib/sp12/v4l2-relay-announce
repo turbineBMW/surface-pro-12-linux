@@ -1,0 +1,31 @@
+#!/bin/sh
+# Surface Pro 12 (Intel): run after a hardware-ISP relay starts
+# (ExecStartPost in the relay drop-in, sp12-camera-hal).
+#
+# With exclusive_caps the v4l2loopback device announces CAPTURE only once the
+# relay streams into it. PipeWire probes a v4l2 device once, when udev
+# announces it, so a WirePlumber that was already running (a fast login, a
+# relay restart) saw an output-only device and made no camera source: apps
+# got the libcamera soft-ISP cameras instead. Wait until the loopback offers
+# capture, then announce it again (udev remove + add) so PipeWire probes it
+# anew. Harmless when nobody is listening yet.
+set -u
+label=${CARD_LABEL:?CARD_LABEL not set}
+
+i=0
+while [ $i -lt 100 ]; do	# up to 20 s
+	for n in /sys/class/video4linux/video*; do
+		[ "$(cat "$n/name" 2>/dev/null)" = "$label" ] || continue
+		if v4l2-ctl -d "/dev/${n##*/}" --info 2>/dev/null |
+			grep -A1 'Device Caps' | grep -q 'Video Capture'; then
+			udevadm trigger --action=remove "$n"
+			udevadm settle --timeout=5
+			udevadm trigger --action=add "$n"
+			exit 0
+		fi
+	done
+	i=$((i + 1))
+	sleep 0.2
+done
+echo "$label: the loopback never offered capture, not announced" >&2
+exit 0

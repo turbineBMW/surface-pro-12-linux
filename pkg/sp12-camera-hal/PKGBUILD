@@ -11,13 +11,13 @@
 pkgname=sp12-camera-hal
 # The HAL release (ipu7-camera-hal e5172cc, 2025-12-10).
 pkgver=2025.12.10
-pkgrel=6
+pkgrel=7
 pkgdesc="Intel IPU7 camera HAL and icamerasrc with the Surface Pro 12 configuration (hardware ISP)"
 arch=(x86_64)
 url="https://github.com/intel/ipu7-camera-hal"
 license=('Apache-2.0' 'LicenseRef-Intel-ipu7-camera-bins')
 depends=(gcc-libs glibc gstreamer gst-plugins-base-libs jsoncpp expat libdrm
-         v4l2-relayd v4l2loopback-dkms)
+         v4l2-relayd v4l2loopback-dkms v4l-utils)
 makedepends=(cmake autoconf automake libtool pkgconf python)
 options=(!lto !debug)
 backup=(etc/v4l2-relayd.d/sp12-front.conf etc/v4l2-relayd.d/sp12-rear.conf)
@@ -105,6 +105,8 @@ PY
 		install -Dm644 "$u/etc/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf" \
 			"$pkgdir/usr/lib/systemd/system/v4l2-relayd@sp12-$cam.service.d/sp12-isp.conf"
 	done
+	# Re-announces a loopback to PipeWire once its relay feeds it (drop-in).
+	install -Dm755 "$u/usr/lib/sp12/v4l2-relay-announce" "$pkgdir/usr/lib/sp12/v4l2-relay-announce"
 	install -Dm644 "$u/etc/modprobe.d/sp12-v4l2loopback.conf" \
 		"$pkgdir/usr/lib/modprobe.d/sp12-v4l2loopback.conf"
 	# The HAL keeps the AE/AWB state (AIQD) between camera opens in
