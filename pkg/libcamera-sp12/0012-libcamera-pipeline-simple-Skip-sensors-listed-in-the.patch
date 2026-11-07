@@ -1,0 +1,113 @@
+From 9cb50891eacbc5ff39f4e734f10ae882da37e6bf Mon Sep 17 00:00:00 2001
+From: turbinebmw <turbine.bmw@gmail.com>
+Date: Fri, 6 Nov 2026 12:32:44 -0500
+Subject: [PATCH] libcamera: pipeline: simple: Skip sensors listed in the
+ configuration
+
+The Surface Pro 12's IR sensor (VD55G0, driven by vd55g1) sits on the same
+IPU7 ISYS media graph as the RGB sensors. Face authentication drives it
+directly through V4L2, and its driver marks the controls it hasn't
+verified on the VD55G0 read-only, so libcamera's sensor setup fails on
+every enumeration with
+
+  ERROR V4L2 'vd55g1 2-0060': Unable to set controls: Permission denied
+  ERROR CameraSensor Failed to create sensor for 'vd55g1 2-0060: -22
+  ERROR SimplePipeline No valid pipeline for sensor 'vd55g1 2-0060', skipping
+
+in every application and in wireplumber. Accepting the sensor instead
+would be worse: the soft ISP can't process GREY, so the simple pipeline
+would pass it through raw and applications would list an IR camera.
+
+Add pipelines.simple.ignored_sensors to the global configuration. A
+listed sensor (full entity name, or the model before the bus address) is
+skipped before any of its devices are opened, with a debug message.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Documentation/runtime_configuration.rst  | 11 ++++++++
+ src/libcamera/pipeline/simple/simple.cpp | 33 ++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/Documentation/runtime_configuration.rst b/Documentation/runtime_configuration.rst
+index a71b715..6c8e8af 100644
+--- a/Documentation/runtime_configuration.rst
++++ b/Documentation/runtime_configuration.rst
+@@ -46,6 +46,8 @@ file structure:
+         supported_devices:
+           - driver: # driver name, e.g. `mxc-isi`
+             software_isp: # true/false
++        ignored_sensors:
++          - ... # sensor entity name or model
+     software_isp:
+       copy_input_buffer: # true/false
+       measure:
+@@ -157,6 +159,15 @@ pipelines.simple.supported_devices.driver, pipelines.simple.supported_devices.so
+ 
+    Example `software_isp` value: ``true``
+ 
++pipelines.simple.ignored_sensors
++   Sensors the simple pipeline handler skips: no camera is created for
++   them and their devices are not opened. An entry matches the sensor's
++   full media entity name or the model before the bus address. Use it for
++   sensors that other software drives directly, such as an IR sensor used
++   for face authentication.
++
++   Example value: ``vd55g1``
++
+ software_isp.copy_input_buffer
+    Define whether input buffers should be copied into standard (cached)
+    memory in software ISP. This is done by default to prevent very slow
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 35e0664..4360636 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1976,6 +1976,32 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
+ 
+ 	LOG(SimplePipeline, Debug) << "Sensor found for " << media->deviceNode();
+ 
++	/*
++	 * Sensors listed in the configuration are left alone: for instance
++	 * an IR sensor used directly through V4L2 for face authentication,
++	 * which must not become a camera for applications. An entry matches
++	 * either the full entity name ("vd55g1 2-0060") or the part before
++	 * the bus address ("vd55g1").
++	 */
++	std::vector<std::string> ignoredSensors;
++	for (const ValueNode &entry :
++	     configuration.configuration()["pipelines"]["simple"]["ignored_sensors"]
++		     .asList()) {
++		std::optional<std::string> name = entry.get<std::string>();
++		if (name)
++			ignoredSensors.push_back(*name);
++	}
++
++	auto isIgnored = [&](const MediaEntity *sensor) {
++		const std::string &name = sensor->name();
++		const std::string model = name.substr(0, name.find(' '));
++
++		return std::any_of(ignoredSensors.begin(), ignoredSensors.end(),
++				   [&](const std::string &ignored) {
++					   return ignored == name || ignored == model;
++				   });
++	};
++
+ 	/*
+ 	 * Create one camera data instance for each sensor and gather all
+ 	 * entities in all pipelines.
+@@ -1986,6 +2012,13 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
+ 	pipelines.reserve(sensors.size());
+ 
+ 	for (MediaEntity *sensor : sensors) {
++		if (isIgnored(sensor)) {
++			LOG(SimplePipeline, Debug)
++				<< "Sensor '" << sensor->name()
++				<< "' ignored by configuration";
++			continue;
++		}
++
+ 		std::unique_ptr<SimpleCameraData> data =
+ 			std::make_unique<SimpleCameraData>(this, numStreams, sensor);
+ 		if (!data->isValid()) {
+-- 
+2.56.0
+

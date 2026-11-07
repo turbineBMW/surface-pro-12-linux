@@ -1048,9 +1048,32 @@ cameras, IR, face unlock and the snoop fix all work.**
     version, or drop it once Arch's pipewire-libcamera links 0.8. Install
     order on a 0.7 system: `pacman -Rdd pipewire-libcamera`, install
     libcamera 0.8, build and install the plugin.
-  - Still open: the IR sensor makes libcamera log "Unable to set controls:
-    Permission denied" before it's skipped (also on 0.7.2 with 7.4); the IR
-    camera is used through `/dev/sp12-ir`, not libcamera.
+  - ~~The IR sensor makes libcamera log "Unable to set controls: Permission
+    denied" before it's skipped~~: fixed in libcamera-sp12 0.8.0-1.2
+    (2026-11-06). Cause: for the VD55G0, our vd55g1 patch makes the controls
+    it hasn't verified read-only (flips, test pattern, vblank, AE, HDR), and
+    libcamera's sensor setup writes the flips and test pattern regardless
+    (EACCES, then "Failed to create sensor ... -22", "No valid pipeline").
+    Making them writable would be worse: the soft ISP can't debayer GREY, so
+    the simple pipeline would pass the IR stream through raw and apps would
+    list an IR camera. Patch `0012` adds `pipelines.simple.ignored_sensors`
+    to libcamera's configuration file, and the package's `configuration.yaml`
+    lists `vd55g1`: the sensor is skipped before any device is opened, with
+    one debug line. The IR camera is still used through `/dev/sp12-ir`.
+    The other libcamera noise, `ov13858` without a selection API ("Unable to
+    get rectangle 0-3 ... Inappropriate ioctl", 5 ERROR lines per
+    enumeration), is patch `0032` (DKMS 1.20): native 4256x3168, active
+    4224x3136 at (16,16), and each mode's crop (nominal for the binned modes,
+    whose borders the registers give only to a few pixels; the Windows
+    4076x2806 window is exactly centred). Verified 2026-11-06 after a reboot:
+    `cam -l` and wireplumber log no errors (two warnings remain: no OV13858
+    sensor delays in libcamera's sensor database, no CCM `offsets` in our
+    tuning files), CROP reads (16,16)/4224x3136 in the default mode, both
+    cameras capture through libcamera and through the ISP relays, and five IR
+    streams in a row complete without CSI errors. An IR stream started while
+    the rear ISP relay was still streaming failed (stop/close time out), as
+    `0028` predicts: the rear and IR cameras share PHY 1 and can't stream
+    together.
 - **GPU ISP: tried 2026-11-04, CPU ISP stays.** "debayer_egl: Fix texture sampling
   steps" (patchwork 28702, 2026-10-29, unreviewed: step 1/stride and 1/height instead
   of 1/(stride-1), 1/(height-1)) on libcamera-sp12 0.8.0, front camera 1920x1080:

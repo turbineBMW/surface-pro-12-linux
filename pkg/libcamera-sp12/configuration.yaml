@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: CC0-1.0
 # libcamera global configuration for the Surface Pro 12 (16 cores): four
 # soft ISP worker threads instead of two keep the CPU debayer, noise
-# reduction and lens shading well inside a 1080p30 frame time.
+# reduction and lens shading well inside a 1080p30 frame time. The IR
+# sensor (VD55G0, vd55g1 driver) is for face authentication through
+# /dev/sp12-ir, not a camera for applications: the simple pipeline skips
+# it (patch 0012) instead of failing on its read-only controls.
 %YAML 1.1
 ---
 version: 1
 configuration:
+  pipelines:
+    simple:
+      ignored_sensors:
+        - vd55g1
   software_isp:
     threads: 4

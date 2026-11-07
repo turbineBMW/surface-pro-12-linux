@@ -731,9 +731,12 @@ static void gst_sp12_autoframe_init(GstSp12AutoFrame *self) {
     gst_base_transform_set_in_place(GST_BASE_TRANSFORM(self), TRUE);
 }
 
+gboolean gst_sp12_bt601_register(GstPlugin *plugin); /* gstsp12bt601.cpp */
+
 static gboolean plugin_init(GstPlugin *plugin) {
     GST_DEBUG_CATEGORY_INIT(gst_sp12_autoframe_debug, "sp12autoframe", 0, "Surface Pro 12 automatic framing");
-    return gst_element_register(plugin, "sp12autoframe", GST_RANK_NONE, GST_TYPE_SP12_AUTOFRAME);
+    return gst_element_register(plugin, "sp12autoframe", GST_RANK_NONE, GST_TYPE_SP12_AUTOFRAME) &&
+           gst_sp12_bt601_register(plugin);
 }
 
 #define PACKAGE "sp12-autoframe"
