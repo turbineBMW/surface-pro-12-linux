@@ -37,6 +37,11 @@ wakeups() {
 			"$(rd "$w/wakeup_count")" "$(rd "$w/active_count")"
 	done | sort
 }
+# IRQ counters of the lines that can end a sleep: the GPIO children (EC wake
+# line "ssam_wakeup", buttons, touch, NFC), the ACPI SCI and the RTC.
+irqs() {
+	awk '/intel-gpio|acpi|rtc/ { n = $1; s = 0; for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) s += $i; print n, s, $NF }' /proc/interrupts | sort
+}
 energy() { rd "$BAT/energy_now"; }   # uWh
 pct() { rd "$BAT/capacity"; }
 s0ix() { rd "$LPIT"; }               # us in S0ix (ACPI LPIT)
@@ -45,6 +50,7 @@ slps0() { rd "$SLP"; }               # us in SLP_S0 (PMC), root only
 if [ "$1" = pre ]; then
 	echo 1 > /sys/power/pm_debug_messages 2>/dev/null
 	wakeups > "$S/sleep.pre.wakeups"
+	irqs > "$S/sleep.pre.irqs"
 	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
 	sentinel=
 	if [ -s "$S/sleep-sentinel" ]; then
@@ -76,4 +82,8 @@ wakeups > "$S/sleep.post.wakeups"
 changed=$(join "$S/sleep.pre.wakeups" "$S/sleep.post.wakeups" |
 	awk '$5 > $2 || $6 > $3 { printf "%s%s +%d events +%d wakeups", sep, $1, $5 - $2, $6 - $3; sep = "; " }')
 [ -n "$changed" ] || changed="no wakeup source moved"
-logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $changed"
+irqs > "$S/sleep.post.irqs"
+fired=$(join "$S/sleep.pre.irqs" "$S/sleep.post.irqs" |
+	awk '$4 > $2 { printf "%sIRQ %s %s +%d", sep, $1, $5, $4 - $2; sep = ", " }')
+[ -n "$fired" ] || fired="no GPIO/ACPI/RTC IRQ fired"
+logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $fired; $changed"
