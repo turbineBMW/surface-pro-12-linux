@@ -493,14 +493,42 @@ Plan, once the battery is above ~50 %, on battery:
    The hook now also diffs the GPIO/ACPI/RTC lines of `/proc/interrupts`, so
    an EC wake is named directly. The NFC reader's IRQ (`nxp-nci_i2c`) fired
    7 times in those 40 s without waking the system.
-2. `sentinel 40`, lid closed, attended for about an hour (the 2026-11-05 loop
-   hung on the 11th cycle, 2026-11-07 on the 57th): the RTC stands in for
-   the EC as the waker, logind supplies the 29 s re-suspend. If it wedges,
-   `hung_task_panic` + pstore give the trace after the reboot, and the last
-   `post` lines show what changed on the cycles before. If it survives, the
-   loop alone is not the trigger and the EC's wake is.
-3. `sentinel 3600`, lid closed, overnight: hourly drain and S0ix share, and
-   the failing hour if it recurs.
+2. **Loop, done 2026-11-08: reproduced and root-caused** (`sentinel 40`, lid
+   closed, EC wake on). The 12th cycle never came back; the machine was at
+   the LUKS prompt because the runner had set `kernel.panic=90`, and
+   efi-pstore kept the panic. 0.24 s into that suspend, after "Suspending
+   console(s)" (so the journal never sees any of this): `intel-lpss
+   0000:00:1e.0: dma_pool_destroy dma3chan1 busy`, then a NULL dereference
+   in `__dma_tx_complete()` from the idma64 completion tasklet
+   (`vchan_complete`) on an idle CPU, "Fatal exception in interrupt", kernel
+   panic. dma3chan1 is the TX channel of the EC's UART (`dw-apb-uart.4`,
+   ttyS4, the Surface Serial Hub link). Root cause: `uart_suspend_port()`
+   clears the port's initialized flag and calls the 8250 shutdown, whose
+   `serial8250_release_dma()` terminates and releases the DMA channels
+   without the port lock, while nothing stops a write from the serdev
+   client (the surface_aggregator packet layer answering an EC frame from
+   a worker) from starting a new TX DMA in that window; the transfer
+   completes on the released channel. About one suspend in 10-50 hits it
+   (cycles 11, 57 and 12 in the three incidents). With `kernel.panic=0`,
+   the default, the panicked kernel sits with its CPUs spinning at ~3 W
+   until the battery is flat: that is the "found dead" state, and why the
+   journal ends at `suspend entry`. The 2026-11-06 pen fix only removed one
+   source of the wake loop that gave the race its chances.
+
+   Fixes (2026-11-08): kernel patches `0033` (serial core: `__uart_start()`
+   only queues while the port is not initialized) and `0034` (8250_dma:
+   detach the channels under the port lock before terminating them, and
+   NULL-safe start and completion paths) on `sp12/7.4`, built as
+   linux-sp12test -4; upstream has neither as of v7.4-rc1-132 (2026-11-03).
+   `etc/sysctl.d/90-sp12-panic-reboot.conf` sets `kernel.panic = 60`, so
+   any future panic reboots to the LUKS prompt instead of draining the
+   battery, with its log in `/sys/fs/pstore`. Still open: which EC event
+   wakes the closed lid every 33 s; with the panic gone the loop costs
+   about 1 Wh an hour, nothing worse.
+3. On the fixed kernel: `sentinel 40`, lid closed, for an hour or more (the
+   race had a 1-in-12 to 1-in-57 chance per cycle, so 100+ clean cycles
+   mean something), then `sentinel 3600` overnight for the hourly drain
+   and S0ix record.
 
 Safety net to decide on, independent of the cause: `suspend-then-hibernate`
 (logind reports both hibernate and suspend-then-hibernate possible; the

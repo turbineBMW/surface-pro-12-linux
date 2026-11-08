@@ -1,0 +1,62 @@
+From 1bec745fc96519a5d9514d0375501a0c2927b55c Mon Sep 17 00:00:00 2001
+From: Brandon Williams <turbine.bmw@gmail.com>
+Date: Sun, 8 Nov 2026 11:44:56 -0500
+Subject: [PATCH 33/34] serial: core: do not start TX on a port that is shut
+ down
+
+uart_suspend_port() clears the port's initialized flag, stops TX and RX,
+drains the transmitter and calls the driver's shutdown(), which on 8250
+ports releases the DMA channels. Nothing stops a write from arriving in
+between: uart_write() queues the data and __uart_start() calls
+start_tx(), and with 8250 DMA that hands a new descriptor to a channel
+that serial8250_release_dma() is terminating and releasing. The transfer
+completes on the released channel and __dma_tx_complete() runs with
+dma->txchan already NULL:
+
+  intel-lpss 0000:00:1e.0: dma_pool_destroy dma3chan1 busy
+  Oops: general protection fault, kernel NULL pointer dereference 0x20
+  RIP: 0010:__dma_tx_complete+0x27/0x1b0
+   vchan_complete+0x2b5/0x310
+   tasklet_action_common+0xc2/0x1f0
+  Kernel panic - not syncing: Fatal exception in interrupt
+
+Seen on a Surface Pro 12 (Intel), whose embedded controller sits behind
+serdev on an LPSS UART (dw-apb-uart with idma64): the surface_aggregator
+packet layer answers EC frames from a worker, and about one suspend in
+ten to fifty hit the window. With the lid closed the EC woke the tablet
+every 30-60 s, so the panic came within the hour, and with panic=0 the
+machine sat dead until the battery was flat.
+
+A port that is not initialized cannot transmit: let __uart_start() only
+queue the data. uart_resume_port() calls start_tx() after startup() and
+sends what accumulated.
+
+Assisted-by: Claude Fable 5.1
+---
+ drivers/tty/serial/serial_core.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/tty/serial/serial_core.c b/drivers/tty/serial/serial_core.c
+index c0deec0e6af4..8f2735e6f1db 100644
+--- a/drivers/tty/serial/serial_core.c
++++ b/drivers/tty/serial/serial_core.c
+@@ -144,6 +144,16 @@ static void __uart_start(struct uart_state *state)
+ 	if (!port || port->flags & UPF_DEAD || uart_tx_stopped(port))
+ 		return;
+ 
++	/*
++	 * uart_suspend_port() clears the initialized flag, drains the
++	 * transmitter and calls the driver's shutdown(), which releases DMA
++	 * channels on 8250 ports. A write landing in that window must only
++	 * queue its data: starting TX now races with that teardown, and
++	 * uart_resume_port() calls start_tx() once the port is up again.
++	 */
++	if (!tty_port_initialized(&state->port))
++		return;
++
+ 	port_dev = port->port_dev;
+ 
+ 	/* Increment the runtime PM usage count for the active check below */
+-- 
+2.56.0
+
