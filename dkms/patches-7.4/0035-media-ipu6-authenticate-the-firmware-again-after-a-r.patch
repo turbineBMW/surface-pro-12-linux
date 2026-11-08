@@ -1,0 +1,117 @@
+From 9cb75a07741322e76ac05a739839c4a9a0e8fee5 Mon Sep 17 00:00:00 2001
+From: Brandon Williams <turbine.bmw@gmail.com>
+Date: Sun, 8 Nov 2026 15:13:15 -0500
+Subject: [PATCH] media: ipu6: authenticate the firmware again after a restore
+ from hibernation
+
+ipu6_resume() re-authenticates the firmware through
+pm_runtime_resume_and_get() on PSYS. PSYS's parent is ISYS, so that
+first runtime-resumes ISYS, whose runtime resume boots the ISYS
+firmware. After a suspend the IPU still holds its authenticated
+firmware and the chain works (the authentication then finds nothing to
+do). After a restore from hibernation the IPU has lost power: the ISYS
+firmware cannot boot unauthenticated ("fw boot timeout"), the runtime
+resume fails, ipu6_resume() logs "Failed to get runtime PM" and returns
+without authenticating, and every camera open afterwards times out
+until a reboot. Nor can the device be re-probed to recover (the IPU
+bridge keeps its software nodes).
+
+When the buttress reports the firmware as not authenticated, power the
+ISYS and PSYS domains directly, set up the PSYS MMU as the probe does,
+authenticate, and power them off again; their runtime PM state is
+"suspended" at that point (an open stream refuses the system suspend),
+so this leaves it consistent. Suspend/resume no longer boots and stops
+the ISYS and PSYS firmware for an authentication that has nothing to do.
+
+Seen on a Surface Pro 12 (IPU7.5, secure mode): after a hibernate the
+ISP relays, libcamera and the IR camera for face unlock were all dead.
+
+Assisted-by: Claude Fable 5.1
+---
+ drivers/media/pci/intel/ipu6/ipu6.c | 61 ++++++++++++++++++++++++-----
+ 1 file changed, 51 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/media/pci/intel/ipu6/ipu6.c b/drivers/media/pci/intel/ipu6/ipu6.c
+index cdf812c02960..49dc0f76af01 100644
+--- a/drivers/media/pci/intel/ipu6/ipu6.c
++++ b/drivers/media/pci/intel/ipu6/ipu6.c
+@@ -941,6 +941,47 @@ static int ipu6_suspend(struct device *dev)
+ 	return 0;
+ }
+ 
++/*
++ * Authenticate the firmware again after the IPU lost power (restore from
++ * hibernation): the probe does this under pm_runtime_get_sync(psys), which
++ * cannot be used here. PSYS's parent is ISYS, so that runtime resume boots
++ * the ISYS firmware first, and in secure mode an unauthenticated firmware
++ * does not boot: the resume returns -ETIMEDOUT, the authentication is never
++ * reached, and every camera open fails until a reboot. Power the two
++ * domains through the buttress directly, as the bus does for a runtime
++ * resume, set up the PSYS MMU like the probe, authenticate, and undo it.
++ * The runtime PM state of ISYS and PSYS is "suspended" at this point (a
++ * stream open refuses the suspend), so powering them off again matches it.
++ */
++static int ipu6_reauthenticate(struct ipu6_device *isp)
++{
++	struct device *isys_dev = &isp->isys->auxdev.dev;
++	struct device *psys_dev = &isp->psys->auxdev.dev;
++	int ret;
++
++	ret = ipu6_buttress_power(isys_dev, isp->isys->ctrl, true);
++	if (ret)
++		return ret;
++
++	ret = ipu6_buttress_power(psys_dev, isp->psys->ctrl, true);
++	if (ret)
++		goto out_isys_off;
++
++	ret = ipu6_mmu_hw_init(isp->psys->mmu);
++	if (ret)
++		goto out_psys_off;
++
++	ret = ipu6_buttress_authenticate(isp);
++
++	ipu6_mmu_hw_cleanup(isp->psys->mmu);
++out_psys_off:
++	ipu6_buttress_power(psys_dev, isp->psys->ctrl, false);
++out_isys_off:
++	ipu6_buttress_power(isys_dev, isp->isys->ctrl, false);
++
++	return ret;
++}
++
+ static int ipu6_resume(struct device *dev)
+ {
+ 	struct pci_dev *pdev = to_pci_dev(dev);
+@@ -960,18 +1001,18 @@ static int ipu6_resume(struct device *dev)
+ 	if (ret)
+ 		dev_err(&isp->pdev->dev, "IPC reset protocol failed!\n");
+ 
+-	ret = pm_runtime_resume_and_get(&isp->psys->auxdev.dev);
+-	if (ret < 0) {
+-		dev_err(&isp->psys->auxdev.dev, "Failed to get runtime PM\n");
+-		return 0;
++	/*
++	 * Across a suspend the IPU keeps its authenticated firmware; across a
++	 * hibernation it does not, and nothing works until the firmware is
++	 * authenticated again.
++	 */
++	if (isp->secure_mode && !ipu6_buttress_auth_done(isp)) {
++		dev_info(dev, "firmware no longer authenticated, authenticating\n");
++		ret = ipu6_reauthenticate(isp);
++		if (ret)
++			dev_err(dev, "FW authentication failed(%d)\n", ret);
+ 	}
+ 
+-	ret = ipu6_buttress_authenticate(isp);
+-	if (ret)
+-		dev_err(&isp->pdev->dev, "FW authentication failed(%d)\n", ret);
+-
+-	pm_runtime_put(&isp->psys->auxdev.dev);
+-
+ 	return 0;
+ }
+ 
+-- 
+2.56.0
+

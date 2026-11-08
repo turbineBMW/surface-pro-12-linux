@@ -560,9 +560,23 @@ re-probes with `ipu_bridge_init` failing on `-EEXIST` ("Failed to register
 the IPU HID node"), because the bridge only unregisters its software nodes
 on an init failure, never on remove; after that the driver is unbound until
 a reboot (tried 2026-11-08, cost a reboot). Untried next time: unbind and
-rebind only `intel_ipu6.isys.40` on the auxiliary bus. A proper fix is a
-`.restore` callback in ipu6 that redoes the buttress authentication (Phase 7
-candidate).
+rebind only `intel_ipu6.isys.40` on the auxiliary bus.
+
+**Fixed 2026-11-08** (kernel patch `0035`, linux-sp12test -5). Runtime-PM
+tracing of a plain suspend showed the mechanism: `ipu6_resume()`
+re-authenticates the firmware through `pm_runtime_resume_and_get()` on
+PSYS, and PSYS's parent is ISYS, so that first runtime-resumes ISYS, whose
+runtime resume boots the ISYS firmware. After s2idle the IPU still holds
+its authenticated firmware and the chain works (the authentication finds
+nothing to do). After a restore from hibernation the IPU has lost power,
+the unauthenticated ISYS firmware cannot boot, the runtime resume fails
+("Failed to get runtime PM"), the authentication is never reached, and
+every later open times out. The patch makes `ipu6_resume()` check
+`ipu6_buttress_auth_done()` and, when the firmware is not authenticated,
+power the ISYS and PSYS domains through the buttress directly, set up the
+PSYS MMU as the probe does, authenticate, and power them off again (their
+runtime PM state is "suspended" then). A plain resume no longer boots and
+stops both firmwares for nothing either.
 
 Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
 with `HibernateDelaySec=48h` and `HibernateOnACPower=no`

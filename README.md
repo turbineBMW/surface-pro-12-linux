@@ -17,7 +17,7 @@ needs 7.4).
 | Battery, AC, fan, temperatures, platform profiles | ✅ | same |
 | Tablet-mode switch (POS) | ✅ | zero-padded source-list fix; source-ID caching stops a posture event storm (~13% CPU) (`dkms/`) |
 | Battery charge limit | ✅ | `surface_battery` charge threshold (`dkms/`) + `sp12-charge-limit N\|off` |
-| Suspend, lid-open wake | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`); S0ix reached, ~0.3 W asleep. A panic in the EC UART's DMA teardown at suspend, which left the tablet dead after closed-lid wake loops, is fixed in the 7.4 series (`dkms/patches-7.4/0033`, `0034`); `kernel.panic=60` reboots instead of draining; EC wake line off while the lid is closed; lid = suspend-then-hibernate after 48 h (hibernate works, but the IPU cameras need a reboot after one) |
+| Suspend, lid-open wake | ✅ | `surface_gpe` entry, GPE `0x30` (`dkms/`); S0ix reached, ~0.3 W asleep. A panic in the EC UART's DMA teardown at suspend, which left the tablet dead after closed-lid wake loops, is fixed in the 7.4 series (`dkms/patches-7.4/0033`, `0034`); `kernel.panic=60` reboots instead of draining; EC wake line off while the lid is closed; lid = suspend-then-hibernate after 48 h; the IPU re-authenticates its firmware after a restore from hibernation (`0035`), so the cameras survive it |
 | Keyboard wake from suspend | ✅ | attached (SSAM) and over Bluetooth: DKMS keeps the keyboard's LE link, patched BlueZ (`pkg/bluez-sp12`) quiets it over sleep |
 | Power / volume buttons | ✅ | `soc_button_array` probe-order fix (`dkms/`) |
 | Touchscreen + Slim Pen | ✅ | stock `i2c_hid_acpi`; tail button over BLE via `sp12-pen-pair` (click / double click / hold), and the pen does not wake the system |
