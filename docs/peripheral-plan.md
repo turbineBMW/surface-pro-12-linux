@@ -468,13 +468,27 @@ Instrumentation (2026-11-08, `userspace/`):
 
 Plan, once the battery is above ~50 %, on battery:
 
-1. `baseline 30`: expect one `post` line, S0ix ≥ 95 %, ≤ 0.3 W, wake IRQ 9
-   (RTC) and `rtc_cmos`/`alarmtimer` the only movers. A spurious wake
-   here names its source directly.
-2. `sentinel 40 --trace`, lid closed, attended for ~40 min (the 2026-11-05 loop
+1. **Baseline, done 2026-11-08** (`sentinel 1800`, lid closed): 1801 s asleep,
+   S0ix 99 % by both the LPIT and the PMC counter, 180 mWh = 0.36 W average
+   (0.6 %/h, with the suspend/resume seconds inside), woken by IRQ 9 (RTC,
+   "ACPI fixed event wakeup"); only `rtc_cmos` (+2 events) and `BAT1`
+   (+1, the driver's refresh at resume) moved. One closed-lid sleep is
+   healthy. Two findings on the way there: (a) with the **lid open** the
+   suspend fails: `isys_suspend` returns -EBUSY because the lock screen that
+   Omarchy raises before sleeping starts a face authentication, which opens
+   the IR camera a few hundred ms after the facelock daemon "released camera
+   for suspend" on logind's PrepareForSleep; systemd retries once and gives
+   up (4 failed suspends in the stats, `omarchy-sleep-lock.service` exits 1).
+   Lid closed, `pam_facelock` skips (`lid_closed`), so this never touched
+   the dead-battery nights, but a lid-open suspend with face unlock cannot
+   work until the daemon or the lock refuses new authentications while a
+   sleep is pending. (b) `--trace` cannot be combined with RTC wakes:
+   `pm_trace` stores its hash in the RTC time registers, so the armed alarm
+   never matches.
+2. `sentinel 40`, lid closed, attended for about an hour (the 2026-11-05 loop
    hung on the 11th cycle, 2026-11-07 on the 57th): the RTC stands in for
    the EC as the waker, logind supplies the 29 s re-suspend. If it wedges,
-   `report` after the forced reboot shows the pm_trace device, and the last
+   `hung_task_panic` + pstore give the trace after the reboot, and the last
    `post` lines show what changed on the cycles before. If it survives, the
    loop alone is not the trigger and the EC's wake is.
 3. `sentinel 3600`, lid closed, overnight: hourly drain and S0ix share, and
