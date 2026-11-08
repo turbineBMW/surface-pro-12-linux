@@ -1,0 +1,127 @@
+#!/bin/bash
+# sp12-suspend-test: controlled suspend tests for the dead-battery hunt
+# (docs/peripheral-plan.md, Phase 4). Needs the sp12-sleep-log hook in
+# /usr/lib/systemd/system-sleep; every sleep then leaves a journal line
+# (tag sp12-sleep) with its length, S0ix share, battery used, wake IRQ and
+# the wakeup sources that moved.
+#
+#   sp12-suspend-test baseline [MINUTES]     one sleep, RTC wake (30 min)
+#   sp12-suspend-test sentinel SECONDS|off   arm the hook: the RTC wakes the
+#                                            system SECONDS after each sleep
+#                                            begins. Lid closed, logind puts it
+#                                            back to sleep after 30 s: 3600
+#                                            gives an hourly record overnight,
+#                                            40 reproduces the wake loop that
+#                                            preceded both dead batteries
+#   sp12-suspend-test loop [N] [ASLEEP] [AWAKE]  attended loop, lid open:
+#                                            N sleeps of ASLEEP s with AWAKE s
+#                                            between (30, 40, 25)
+#   sp12-suspend-test report [SINCE]         sp12-sleep lines, suspend stats,
+#                                            pm_trace match, pstore (today)
+#   sp12-suspend-test previous               wake/suspend cycle table of the
+#                                            previous boot
+# Options: --min-battery PCT (30)  --ac (allow the charger)  --trace (pm_trace:
+# names a device that hangs in suspend/resume on the next boot; corrupts the
+# RTC clock until the next shutdown)  --no-panic (leave hung_task_panic alone)
+# baseline, sentinel and loop need root (sudo -A); report and previous don't.
+# SPDX-License-Identifier: MIT
+set -u
+HOOK=/usr/lib/systemd/system-sleep/sp12-sleep-log
+S=/run/sp12
+BAT=/sys/class/power_supply/BAT1
+minbat=30 ac=0 trace=0 panic=1
+args=()
+for a in "$@"; do
+	case "$a" in
+	--ac) ac=1 ;;
+	--trace) trace=1 ;;
+	--no-panic) panic=0 ;;
+	--min-battery=*) minbat=${a#*=} ;;
+	--min-battery) minbat=__next ;;
+	*) if [ "$minbat" = __next ]; then minbat=$a; else args+=("$a"); fi ;;
+	esac
+done
+mode=${args[0]:-}
+die() { echo "sp12-suspend-test: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = 0 ] || die "$mode needs root: ASKPASS_REASON=\"...\" sudo -A $0 $*"; }
+stats() { echo "$(cat /sys/power/suspend_stats/success) $(cat /sys/power/suspend_stats/fail)"; }
+
+preflight() {
+	[ -x $HOOK ] || die "$HOOK is missing; install it from userspace/ first"
+	local pct=$(cat $BAT/capacity) adp=$(cat /sys/class/power_supply/ADP1/online 2>/dev/null || echo 0)
+	[ "$pct" -ge "$minbat" ] || die "battery at $pct %, below $minbat % (--min-battery to override)"
+	if [ "$adp" = 1 ] && [ $ac = 0 ]; then die "the charger is plugged in; the drain figures need battery power (--ac to run anyway)"; fi
+	echo 1 > /sys/power/pm_debug_messages
+	if [ $panic = 1 ]; then
+		# A suspend thread stuck in a driver for 2 min panics and reboots instead
+		# of draining the battery for a night. The panic log only survives if
+		# efi-pstore is on (efi_pstore.pstore_disable=0 on the kernel command line).
+		sysctl -q kernel.hung_task_panic=1 kernel.panic=90
+		[ "$(cat /sys/module/efi_pstore/parameters/pstore_disable 2>/dev/null)" = N ] ||
+			echo "note: efi-pstore is off, a panic reboots the machine but its log is lost (add efi_pstore.pstore_disable=0 to /etc/kernel/cmdline)"
+	fi
+	if [ $trace = 1 ]; then
+		echo 1 > /sys/power/pm_trace && echo "pm_trace on: after a hang and a reboot, 'sp12-suspend-test report' shows the device; the RTC clock is wrong until the next clean shutdown"
+	fi
+	echo "battery $pct % ($(cat $BAT/status)), lid $(awk '{print $2}' /proc/acpi/button/lid/*/state 2>/dev/null | head -1), suspend stats before: $(stats) (success fail)"
+}
+
+one_sleep() { # seconds
+	rtcwake -m no -s "$1" >/dev/null || die "rtcwake failed"
+	local t0=$(date +%s) before=$(stats)
+	systemctl suspend || die "systemctl suspend failed"
+	sleep 3
+	local after=$(stats)
+	journalctl -t sp12-sleep --since "@$t0" -o cat --no-pager | grep '^post' || echo "no sp12-sleep post line (hook not run?)"
+	[ "${after#* }" = "${before#* }" ] || { echo "SUSPEND FAILED: $(cat /sys/power/suspend_stats/last_failed_dev) step $(cat /sys/power/suspend_stats/last_failed_step)"; return 1; }
+}
+
+case "$mode" in
+baseline)
+	need_root "$@"; min=${args[1]:-30}
+	[ -s $S/sleep-sentinel ] && die "a sentinel is armed ($(cat $S/sleep-sentinel) s); 'sentinel off' first"
+	preflight
+	echo "one sleep of $min min, RTC wake. Close the lid or leave it: nothing to do until it wakes."
+	one_sleep $((min * 60)) && echo "OK"
+	;;
+sentinel)
+	need_root "$@"; v=${args[1]:-}
+	[ -n "$v" ] || die "sentinel SECONDS|off"
+	mkdir -p $S
+	if [ "$v" = off ]; then rm -f $S/sleep-sentinel; echo "sentinel off"; exit 0; fi
+	[ "$v" -ge 20 ] 2>/dev/null || die "SECONDS must be a number >= 20"
+	preflight
+	echo "$v" > $S/sleep-sentinel
+	echo "armed: every sleep now ends after $v s (RTC). Close the lid; logind re-suspends 30 s after each wake."
+	echo "read it back with: sp12-suspend-test report; stop with: sp12-suspend-test sentinel off"
+	;;
+loop)
+	need_root "$@"; n=${args[1]:-30}; asleep=${args[2]:-40}; awake=${args[3]:-25}
+	[ -s $S/sleep-sentinel ] && die "a sentinel is armed; 'sentinel off' first"
+	preflight
+	echo "$n sleeps of $asleep s, $awake s awake between. Leave the lid open and the machine alone."
+	for i in $(seq "$n"); do
+		printf '%2d/%d %s ' "$i" "$n" "$(date +%T)"
+		one_sleep "$asleep" || exit 1
+		sleep "$awake"
+	done
+	echo "OK: $n cycles, suspend stats after: $(stats)"
+	;;
+report)
+	since=${args[1]:-today}
+	echo "=== sp12-sleep since $since"; journalctl -t sp12-sleep --since "$since" -o short --no-pager | cut -c1-15,42-
+	echo "=== suspend stats (this boot): success $(cat /sys/power/suspend_stats/success), fail $(cat /sys/power/suspend_stats/fail), last failed dev '$(cat /sys/power/suspend_stats/last_failed_dev | head -1)' step '$(cat /sys/power/suspend_stats/last_failed_step | head -1)'"
+	m=$(cat /sys/power/pm_trace_dev_match 2>/dev/null); [ -n "$m" ] && echo "=== devices hashing to what the RTC held at boot: $m (meaningful only after a hang under --trace)"
+	journalctl -k -b --no-pager -o cat 2>/dev/null | grep -iE "magic number|hash matches" | head -5
+	if [ "$(id -u)" = 0 ]; then echo "=== pstore"; ls -la /sys/fs/pstore/ 2>/dev/null | tail -n +2; fi
+	;;
+previous)
+	echo "=== boot -1: suspend cycles (entry -> exit)"
+	journalctl -b -1 --no-pager -o short-unix 2>/dev/null | grep -E "PM: suspend (entry|exit)" |
+		awk '{t=int($1); if ($0 ~ /entry/) {if (pe) printf "awake %5d s   ", t-pe; else printf "%18s", ""; e=t; printf "%s ", strftime("%m-%d %H:%M:%S", t)} else {printf "-> %s asleep %6d s\n", strftime("%H:%M:%S", t), t-e; pe=t}} END {if (e > pe) print "-> (no exit logged: died or hung in that sleep)"}'
+	echo "=== boot -1: last sp12-sleep lines"; journalctl -b -1 -t sp12-sleep --no-pager -o short -n 12 2>/dev/null | cut -c1-15,42-
+	;;
+*)
+	sed -n '2,/^# SPDX/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
+	;;
+esac
