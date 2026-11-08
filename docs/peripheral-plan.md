@@ -593,6 +593,27 @@ after a power loss failing is a vd55g1 wrinkle worth a retry in the driver.
 With the cameras surviving, `HibernateDelaySec` went from 48 h to 12 h and
 the hook now reports whether the IPU re-authenticated after a hibernate.
 
+**IR node format reset (2026-11-08 evening, open).** After the second
+hibernate `facelock test` refused `/dev/video8`: "negotiated YUYV, which is
+not a mono format". The sensor and CSI2 pad formats were still Y8 644x604
+and the link enabled; only the capture node's own format had gone back to
+the driver default (YUYV 3840x2160), and facelock runs with
+`keep_format = true` (it has no size setting, and the ISYS node needs
+exactly 644x604 or STREAMON fails with EPIPE), so it uses whatever the node
+has. The journal shows face unlock already failing with "error: internal"
+at the 17:05 lid-open resume, before that hibernate, so the reset happened
+between 15:28 (IR streamed) and 17:05, during s2idle cycles with nothing
+using the camera. Not libcamera: `cam -l` and captures on both cameras
+leave the node's format alone. Re-running `sp12-ir-graph` restores GREY
+644x604 and the IR streams. Mitigation: the hook re-applies the IR graph at
+every resume and logs when the format had changed; diagnostic: the IR udev
+rule sets `dev_debug=2` on the node, so the kernel logs every ioctl on it
+with the caller's name (`journalctl -k | grep "video8.*S_FMT"` names the
+culprit next time). Separately, the first IR stream start after a power
+loss times out once ("vd55g0 stream start failed -110: fsm=0x1", vd55g1
+returns -EINVAL after `pm_runtime_put`) and the daemon's reopen a few
+seconds later works; a retry in `vd55g0_enable_streams` is the fix to make.
+
 Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
 with `HibernateDelaySec=48h` (12 h since the IPU fix below) and `HibernateOnACPower=no`
 (`etc/systemd/sleep.conf.d/30-sp12-hibernate.conf`,
