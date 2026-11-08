@@ -21,7 +21,10 @@
 # SPDX-License-Identifier: MIT
 
 [ "$1" = pre ] || [ "$1" = post ] || exit 0
-S=/run/sp12
+# State in a root-owned subdirectory: /run/sp12 is sticky and world-writable,
+# and fs.protected_regular refuses root a file another user created there.
+S=/run/sp12/sleep
+SENTINEL=/run/sp12/sleep-sentinel
 mkdir -p "$S"
 BAT=/sys/class/power_supply/BAT1
 LPIT=/sys/devices/system/cpu/cpuidle/low_power_idle_system_residency_us
@@ -53,8 +56,8 @@ if [ "$1" = pre ]; then
 	irqs > "$S/sleep.pre.irqs"
 	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
 	sentinel=
-	if [ -s "$S/sleep-sentinel" ]; then
-		sentinel=$(tr -dc 0-9 < "$S/sleep-sentinel")
+	if [ -s "$SENTINEL" ]; then
+		sentinel=$(tr -dc 0-9 < "$SENTINEL")
 		[ -n "$sentinel" ] && rtcwake -m no -s "$sentinel" >/dev/null 2>&1 && sentinel=", RTC wake in $sentinel s" || sentinel=", sentinel: rtcwake failed"
 	fi
 	logger -t $TAG "pre $2: battery $(pct) % ($(( $(energy) / 1000 )) mWh, $(rd "$BAT/status")), lid $(lid), S0ix counter $(s0ix) us$sentinel"
