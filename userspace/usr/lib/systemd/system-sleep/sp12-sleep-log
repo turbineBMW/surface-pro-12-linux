@@ -73,6 +73,7 @@ if [ "$1" = pre ]; then
 	wakeups > "$S/sleep.pre.wakeups"
 	irqs > "$S/sleep.pre.irqs"
 	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
+	dmesg 2>/dev/null | grep -c "hibernation: hibernation exit" > "$S/hibernations.pre"
 	ecwake=
 	if [ "$EC_WAKE_LID_CLOSED" = no ] && [ "$(lid)" = closed ] && [ -w "$EC_WAKE" ]; then
 		cat "$EC_WAKE" > "$S/ecwake.saved"
@@ -106,6 +107,15 @@ if [ "$TRACE_EC_EVENTS" = yes ] && [ -r "$TRACE/trace" ]; then
 		sed -E 's/.*ssam_rx_event_received: *//; s/rqid=[^ ,]*,? *//' | sort | uniq -c |
 		awk '{ n = $1; $1 = ""; printf "%s%dx%s", sep, n, $0; sep = ";" }')
 	[ -n "$events" ] && events="; EC events at resume:$events" || events="; no EC event at resume"
+fi
+# A hibernate that actually happened (suspend-then-hibernate may not have)
+# leaves the IPU's ISYS firmware unable to boot and the IPU cannot be
+# re-probed, so the cameras need a reboot: say so and leave a flag.
+h0=$(cat "$S/hibernations.pre" 2>/dev/null || echo 0)
+h1=$(dmesg 2>/dev/null | grep -c "hibernation: hibernation exit")
+if [ "$h1" -gt "$h0" ]; then
+	touch /run/sp12/cameras-need-reboot
+	logger -t $TAG -p user.warning "post $2: resumed from hibernation; the IPU cameras (ISP, libcamera, IR face unlock) will not work until a reboot"
 fi
 [ -s "$S/sleep.pre" ] || { logger -t $TAG "post $2: no pre record"; exit 0; }
 read -r t0 e0 l0 p0 c0 < "$S/sleep.pre"

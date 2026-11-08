@@ -535,14 +535,45 @@ Plan, once the battery is above ~50 %, on battery:
    longer kills the machine, and why the EC event behind it is still worth
    finding. Next: `sentinel 3600`, lid closed, overnight.
 
-Safety net to decide on, independent of the cause: `suspend-then-hibernate`
-(logind reports both hibernate and suspend-then-hibernate possible; the
-Omarchy install put `resume=`/`resume_offset=` on the kernel command line
-and a 31 GB swap file, but hibernation has never run on this machine).
-Switching `HandleLidSwitch` and the idle plugin's `systemctl suspend` to it,
-with `HibernateDelaySec=` of a few hours, turns a lost night into a resume
-from disk, but a kernel that hangs in the suspend path never reaches the
-hibernate step.
+**EC wake rule and hibernate (2026-11-08, afternoon).** With the lid closed
+the hook now turns the EC's wake line (`serial0-0` wakeup) off for the sleep
+and restores it at resume (`/etc/sp12/sleep.conf`, `EC_WAKE_LID_CLOSED=no`):
+a closed lid means the attached keyboard, the only user of that wake, cannot
+be typed on, and lid-open arrives through ACPI GPE 0x30 ("ACPI non-EC GPE
+wakeup", the GPE count moved, `ssam_wakeup` did not) and the power button
+through gpio-keys. Verified with a 72 s closed-lid sleep, 99 % S0ix. The hook
+also clears and reads the `ssam_rx_event_received` tracepoint around each
+sleep, so the post line names the EC events delivered at resume (first
+sample, charger plugged: BAT 0x16, 0x18 and 0x69); the event behind the
+2026-11-05/07 wake loops will show up there if it recurs with the rule off.
+
+Hibernate works: `systemctl hibernate` wrote a 12 GB image (3.05 M pages,
+2.5 s to allocate), reached S4, powered off, and resumed into the same kernel
+instance through the LUKS prompt with the session intact. But the IPU does
+not survive it: the ISYS firmware then fails to boot ("fw boot timeout,
+state 0x57a7e000", PSYS "Runtime PM failed (-16)"), the ISP relays deliver
+no frames and libcamera's cameras (same ISYS) are gone too, so face unlock
+as well. `ipu6_resume()` is also the restore path (`SYSTEM_SLEEP_PM_OPS`)
+and does not re-authenticate the firmware after a power loss. Recovery
+without a reboot is not possible either: a PCI remove/rescan of 0000:00:05.0
+re-probes with `ipu_bridge_init` failing on `-EEXIST` ("Failed to register
+the IPU HID node"), because the bridge only unregisters its software nodes
+on an init failure, never on remove; after that the driver is unbound until
+a reboot (tried 2026-11-08, cost a reboot). Untried next time: unbind and
+rebind only `intel_ipu6.isys.40` on the auxiliary bus. A proper fix is a
+`.restore` callback in ipu6 that redoes the buttress authentication (Phase 7
+candidate).
+
+Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
+with `HibernateDelaySec=48h` and `HibernateOnACPower=no`
+(`etc/systemd/sleep.conf.d/30-sp12-hibernate.conf`,
+`etc/systemd/logind.conf.d/30-sp12-lid.conf`): a night or a day closed is
+never touched (0.3 W, ~6 % per 12 h), a forgotten multi-day close hibernates
+instead of draining, and the hook then logs a warning and leaves
+`/run/sp12/cameras-need-reboot`. With the panic fixed and `kernel.panic=60`
+this is the second net, not the first. The sentinel is only armed for plain
+suspends, so an overnight record now comes from the battery history, not
+hourly wakes.
 
 ### Phase 4b: ambient light sensor and auto-brightness (done)
 `sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows
