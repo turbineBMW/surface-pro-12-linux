@@ -560,12 +560,41 @@ re-probes with `ipu_bridge_init` failing on `-EEXIST` ("Failed to register
 the IPU HID node"), because the bridge only unregisters its software nodes
 on an init failure, never on remove; after that the driver is unbound until
 a reboot (tried 2026-11-08, cost a reboot). Untried next time: unbind and
-rebind only `intel_ipu6.isys.40` on the auxiliary bus. A proper fix is a
-`.restore` callback in ipu6 that redoes the buttress authentication (Phase 7
-candidate).
+rebind only `intel_ipu6.isys.40` on the auxiliary bus.
+
+**Fixed 2026-11-08** (kernel patch `0035`, linux-sp12test -5). Runtime-PM
+tracing of a plain suspend showed the mechanism: `ipu6_resume()`
+re-authenticates the firmware through `pm_runtime_resume_and_get()` on
+PSYS, and PSYS's parent is ISYS, so that first runtime-resumes ISYS, whose
+runtime resume boots the ISYS firmware. After s2idle the IPU still holds
+its authenticated firmware and the chain works (the authentication finds
+nothing to do). After a restore from hibernation the IPU has lost power,
+the unauthenticated ISYS firmware cannot boot, the runtime resume fails
+("Failed to get runtime PM"), the authentication is never reached, and
+every later open times out. The patch makes `ipu6_resume()` check
+`ipu6_buttress_auth_done()` and, when the firmware is not authenticated,
+power the ISYS and PSYS domains through the buttress directly, set up the
+PSYS MMU as the probe does, authenticate, and power them off again (their
+runtime PM state is "suspended" then). A plain resume no longer boots and
+stops both firmwares for nothing either. Verified 2026-11-08 on
+linux-sp12test -5: after the restore the log shows "firmware no longer
+authenticated, authenticating", BOOT_LOAD and AUTHENTICATE_RUN to the CSE,
+"authenticate_run done"; the front and rear ISP relays streamed at the first
+try, libcamera captured, and the IR sensor streamed at the second try (its
+first start one second after the restore timed out, "vd55g0 stream start
+failed -110: fsm=0x1"; the facelock daemon dropped its warm camera and
+reopened it ten seconds later), so face unlock works after a short delay.
+Two notes: the Bluetooth controller is an S4 wake source (`BTPC` in
+`/proc/acpi/wakeup`) and the Flex Keyboard's link is wake-allowed, so a
+touch on the attached keyboard, or its reconnect, wakes the tablet out of
+hibernation to the LUKS prompt (the folded, closed keyboard cannot be
+touched, so the closed-lid case is unaffected); and the first IR stream
+after a power loss failing is a vd55g1 wrinkle worth a retry in the driver.
+With the cameras surviving, `HibernateDelaySec` went from 48 h to 12 h and
+the hook now reports whether the IPU re-authenticated after a hibernate.
 
 Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
-with `HibernateDelaySec=48h` and `HibernateOnACPower=no`
+with `HibernateDelaySec=48h` (12 h since the IPU fix below) and `HibernateOnACPower=no`
 (`etc/systemd/sleep.conf.d/30-sp12-hibernate.conf`,
 `etc/systemd/logind.conf.d/30-sp12-lid.conf`): a night or a day closed is
 never touched (0.3 W, ~6 % per 12 h), a forgotten multi-day close hibernates
