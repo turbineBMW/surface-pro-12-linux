@@ -30,7 +30,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works** (`0006`, stock nxp-nci core): phones, and contactless cards when polling includes a listen phase (initiator + NFC-DEP target, as Windows does). Reader-only polling misses cards (8b). Daemon + Omarchy plugin: 8b2 | stock nxp-nci + `0006`, tools 1.21 |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
-| 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency). Keyboard wake works attached and over Bluetooth (Phase 4, `0025`/`0026`, bluez-sp12) | |
+| 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency). Keyboard wake works attached and over Bluetooth (Phase 4, `0025`/`0026`, bluez-sp12). The dead-battery panic in the EC UART's DMA teardown is fixed (`0033`/`0034`, Phase 4) | |
 | 9 | Speakers | `rt1320` | **Fine, not reproduced** (2026-09-24): loud and clean at 100% and at low steps with bass-heavy tracks. #2144 had reported distortion at high volume and low loudness at low volume | |
 | 10 | Slim Pen tail button | BLE | **Works** (`sp12-pen-pair`, tools 1.28): Meta+F20 / F19 / F18 for click / double click / hold; any click reconnects, docked or not | bluez |
 | 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | Temperatures **work** via `surface_temp` (hwmon `surface_thermal`: RTS1–6, VTS1–4); the ACPI devices themselves stay unbound | Windows PEP/thermal framework |
@@ -414,6 +414,135 @@ Results (2026-09-23):
     suspend). Options: a BlueZ fork that does it on logind PrepareForSleep, or
     disabling BlueZ's battery plugin and having a helper own the battery
     notifications (Stop/StartNotify around sleep, BatteryProvider1 for UPower).
+
+#### Dead battery after a closed-lid suspend (2026-11-05 and 2026-11-07, open)
+
+Twice the tablet was found at 0 % after a lid-closed sleep. Both journals end
+the same way: a wake/suspend loop, then a final `PM: suspend entry (s2idle)`
+with nothing after it. UPower's battery history gives the rest:
+
+|                                   | 2026-11-05                               | 2026-11-07                                       |
+|-----------------------------------|------------------------------------------|--------------------------------------------------|
+| battery before the last sleep     | 80 % at 17:24 (charge limit, unplugged)  | 70 % at 18:09                                    |
+| long sleep                        | none                                     | 18:13 → 19:17 next day: 25.1 h, 70 → 58 %        |
+| wake loop                         | 17:52–18:03, 10 cycles                   | 19:17–20:12, 56 cycles                           |
+| asleep / awake per cycle          | 39–83 s / 29 s                           | 2–62 s, then a steady 33–34 s / 29 s             |
+| last journal line                 | 18:03:40 suspend entry                   | 20:12:13 suspend entry (battery ~55 %)           |
+| found                             | 07:16 next day, 0 %                      | 08:23 next day, 0 %                              |
+| draw after the last entry         | ≥ 80 % in 13 h ≈ 3.2 W                   | ≥ 55 % in 12 h ≈ 2.4 W                           |
+
+So s2idle itself is healthy: the 25 h sleep cost 0.48 %/h (≈ 0.26 W, the same
+as the 2026-09-23 figure). The battery dies in a state entered after a loop:
+ten times the sleep draw, no journal (the console is suspended and journald is
+frozen from `suspend entry` on, so a hang in a device callback and a sleep
+that never reaches S0ix look identical from the logs). The 29 s awake is
+logind's lid holdoff re-suspending with the lid still closed. The wakes came
+from the EC's `ssam_wakeup` GPIO (2026-11-06 A/B, pen section); the pen's
+Bluetooth wake was turned off that day (tools 1.34), but the 2026-11-07 loop
+ran with it off (`WakeAllowed: no`; the pen reconnected on every wake only
+because the host was awake), so the EC event behind the loop is still
+unknown. Charger-state events do wake the system: the 16:55:01 wake on
+2026-11-06 is the second the charge limit flipped the battery from charging
+to discharging (SSAM event tc 0x02 cid 0x69, unhandled; cid 0x15/0x16/0x53
+= BIX/BST/DPTF came with the wake after the 25 h sleep).
+
+Instrumentation (2026-11-08, `userspace/`):
+
+- `usr/lib/systemd/system-sleep/sp12-sleep-log`: runs at every suspend. Pre:
+  snapshots `/sys/class/wakeup/*` counters, battery energy and the LPIT /
+  PMC S0ix counters, turns on `pm_debug_messages`, syncs the journal. Post:
+  one `sp12-sleep` journal line with the sleep length, S0ix share, battery
+  used and average draw, `pm_wakeup_irq` with its name, and every wakeup
+  source whose counters moved. `/run/sp12/sleep-sentinel` (seconds) makes it
+  arm the RTC at each sleep, so a closed-lid night becomes an hourly record.
+- `usr/local/bin/sp12-suspend-test`: `baseline` (one RTC-timed sleep),
+  `sentinel SECONDS|off`, `loop` (attended, lid open), `report`, `previous`
+  (the cycle table of the last boot). Preflight refuses below 30 % battery
+  or on the charger, sets `hung_task_panic=1` + `panic=90` so a suspend
+  thread stuck for 2 min reboots instead of draining the battery, and with
+  `--trace` turns on `pm_trace` (device name of a hang on the next boot; the
+  RTC clock is wrong until the next clean shutdown). A panic's log needs
+  efi-pstore, which Arch builds disabled: `etc/limine-entry-tool.d/efi-pstore.conf`
+  adds `efi_pstore.pstore_disable=0` to the kernel command line (applied here
+  2026-11-08 with `limine-mkinitcpio`, both kernels; active from the next boot).
+
+Plan, once the battery is above ~50 %, on battery:
+
+1. **Baseline, done 2026-11-08** (`sentinel 1800`, lid closed): 1801 s asleep,
+   S0ix 99 % by both the LPIT and the PMC counter, 180 mWh = 0.36 W average
+   (0.6 %/h, with the suspend/resume seconds inside), woken by IRQ 9 (RTC,
+   "ACPI fixed event wakeup"); only `rtc_cmos` (+2 events) and `BAT1`
+   (+1, the driver's refresh at resume) moved. One closed-lid sleep is
+   healthy. Two findings on the way there: (a) with the **lid open** the
+   suspend fails: `isys_suspend` returns -EBUSY because the lock screen that
+   Omarchy raises before sleeping starts a face authentication, which opens
+   the IR camera a few hundred ms after the facelock daemon "released camera
+   for suspend" on logind's PrepareForSleep; systemd retries once and gives
+   up (4 failed suspends in the stats, `omarchy-sleep-lock.service` exits 1).
+   Lid closed, `pam_facelock` skips (`lid_closed`), so this never touched
+   the dead-battery nights, but a lid-open suspend with face unlock cannot
+   work until the daemon or the lock refuses new authentications while a
+   sleep is pending. (b) `--trace` cannot be combined with RTC wakes:
+   `pm_trace` stores its hash in the RTC time registers, so the armed alarm
+   never matches. (c) Lid open, suspended by typing `systemctl suspend`, the
+   tablet woke after 1-2 s through the EC's wake line (`ssam_wakeup`, GPIO
+   IRQ 144 under IRQ 14, no wakeup source credited: `ssam_irq_handle()`
+   registers none): the key release and touchpad contact that follow the
+   Enter reach the EC, which holds them and wakes the host. The same command
+   behind `sleep 10` with hands off slept the full 40 s to the RTC, 97 % S0ix.
+   The hook now also diffs the GPIO/ACPI/RTC lines of `/proc/interrupts`, so
+   an EC wake is named directly. The NFC reader's IRQ (`nxp-nci_i2c`) fired
+   7 times in those 40 s without waking the system.
+2. **Loop, done 2026-11-08: reproduced and root-caused** (`sentinel 40`, lid
+   closed, EC wake on). The 12th cycle never came back; the machine was at
+   the LUKS prompt because the runner had set `kernel.panic=90`, and
+   efi-pstore kept the panic. 0.24 s into that suspend, after "Suspending
+   console(s)" (so the journal never sees any of this): `intel-lpss
+   0000:00:1e.0: dma_pool_destroy dma3chan1 busy`, then a NULL dereference
+   in `__dma_tx_complete()` from the idma64 completion tasklet
+   (`vchan_complete`) on an idle CPU, "Fatal exception in interrupt", kernel
+   panic. dma3chan1 is the TX channel of the EC's UART (`dw-apb-uart.4`,
+   ttyS4, the Surface Serial Hub link). Root cause: `uart_suspend_port()`
+   clears the port's initialized flag and calls the 8250 shutdown, whose
+   `serial8250_release_dma()` terminates and releases the DMA channels
+   without the port lock, while nothing stops a write from the serdev
+   client (the surface_aggregator packet layer answering an EC frame from
+   a worker) from starting a new TX DMA in that window; the transfer
+   completes on the released channel. About one suspend in 10-50 hits it
+   (cycles 11, 57 and 12 in the three incidents). With `kernel.panic=0`,
+   the default, the panicked kernel sits with its CPUs spinning at ~3 W
+   until the battery is flat: that is the "found dead" state, and why the
+   journal ends at `suspend entry`. The 2026-11-06 pen fix only removed one
+   source of the wake loop that gave the race its chances.
+
+   Fixes (2026-11-08): kernel patches `0033` (serial core: `__uart_start()`
+   only queues while the port is not initialized) and `0034` (8250_dma:
+   detach the channels under the port lock before terminating them, and
+   NULL-safe start and completion paths) on `sp12/7.4`, built as
+   linux-sp12test -4; upstream has neither as of v7.4-rc1-132 (2026-11-03).
+   `etc/sysctl.d/90-sp12-panic-reboot.conf` sets `kernel.panic = 60`, so
+   any future panic reboots to the LUKS prompt instead of draining the
+   battery, with its log in `/sys/fs/pstore`. Still open: which EC event
+   wakes the closed lid every 33 s; with the panic gone the loop costs
+   about 1 Wh an hour, nothing worse.
+3. **Fixed kernel, done 2026-11-08** (linux-sp12test -4, `sentinel 40`, lid
+   closed, 12:28-14:29): 105 cycles, 105 suspends succeeded, 0 failed, no
+   panic (the old kernel died on cycles 11, 57 and 12). 104 wakes were the
+   RTC (IRQ 9), the last the lid opening, which arrives through the EC's
+   wake line (`ssam_wakeup`); S0ix 95-96 % of every 41 s sleep. The loop
+   itself cost 80 -> 71 % in two hours, about 2 Wh/h for 30 s awake per
+   cycle: that is what a closed-lid EC wake loop costs now that it no
+   longer kills the machine, and why the EC event behind it is still worth
+   finding. Next: `sentinel 3600`, lid closed, overnight.
+
+Safety net to decide on, independent of the cause: `suspend-then-hibernate`
+(logind reports both hibernate and suspend-then-hibernate possible; the
+Omarchy install put `resume=`/`resume_offset=` on the kernel command line
+and a 31 GB swap file, but hibernation has never run on this machine).
+Switching `HandleLidSwitch` and the idle plugin's `systemctl suspend` to it,
+with `HibernateDelaySec=` of a few hours, turns a lost night into a resume
+from disk, but a kernel that hangs in the suspend path never reaches the
+hibernate step.
 
 ### Phase 4b: ambient light sensor and auto-brightness (done)
 `sp12-als` streams the ALS with change sensitivity 0, as Windows reads it (Windows

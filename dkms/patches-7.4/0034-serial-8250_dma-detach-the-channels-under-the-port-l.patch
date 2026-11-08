@@ -1,0 +1,133 @@
+From 4de3b54c68aaf15a1f014e3901a450d041f0cd5b Mon Sep 17 00:00:00 2001
+From: Brandon Williams <turbine.bmw@gmail.com>
+Date: Sun, 8 Nov 2026 11:44:56 -0500
+Subject: [PATCH 34/34] serial: 8250_dma: detach the channels under the port
+ lock before releasing them
+
+serial8250_release_dma() terminates and releases the RX and TX channels
+and only afterwards clears dma->rxchan and dma->txchan, all without the
+port lock. serial8250_tx_dma() and serial8250_rx_dma() run under the
+port lock and can start a transfer on a channel between its
+dmaengine_terminate_sync() and its dma_release_channel(); the completion
+then runs on a channel that is gone:
+
+  intel-lpss 0000:00:1e.0: dma_pool_destroy dma3chan1 busy
+  Oops: general protection fault, kernel NULL pointer dereference 0x20
+  RIP: 0010:__dma_tx_complete+0x27/0x1b0
+   vchan_complete+0x2b5/0x310
+  Kernel panic - not syncing: Fatal exception in interrupt
+
+Take the channels out of the dma state under the port lock first, then
+terminate and release them, and make the start and completion paths
+check for a missing channel: serial8250_tx_dma() and serial8250_rx_dma()
+return -EINVAL so their callers fall back to PIO, and __dma_tx_complete()
+returns once it holds the lock and finds the channel gone (the buffer
+sync moves under the lock, where it is allowed).
+
+Seen on a Surface Pro 12 (Intel) when its embedded controller's serdev
+client wrote to the UART while uart_suspend_port() shut it down.
+
+Assisted-by: Claude Fable 5.1
+---
+ drivers/tty/serial/8250/8250_dma.c | 53 ++++++++++++++++++++++--------
+ 1 file changed, 40 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/tty/serial/8250/8250_dma.c b/drivers/tty/serial/8250/8250_dma.c
+index 1da605cc8601..c9ddcc4062bd 100644
+--- a/drivers/tty/serial/8250/8250_dma.c
++++ b/drivers/tty/serial/8250/8250_dma.c
+@@ -19,11 +19,17 @@ static void __dma_tx_complete(void *param)
+ 	unsigned long	flags;
+ 	int		ret;
+ 
++	uart_port_lock_irqsave(&p->port, &flags);
++
++	/* serial8250_release_dma() took the channel away under the lock. */
++	if (!dma->txchan) {
++		uart_port_unlock_irqrestore(&p->port, flags);
++		return;
++	}
++
+ 	dma_sync_single_for_cpu(dmaengine_get_dma_device(dma->txchan), dma->tx_addr,
+ 				UART_XMIT_SIZE, DMA_TO_DEVICE);
+ 
+-	uart_port_lock_irqsave(&p->port, &flags);
+-
+ 	dma->tx_running = 0;
+ 
+ 	uart_xmit_advance(&p->port, dma->tx_size);
+@@ -94,6 +100,10 @@ int serial8250_tx_dma(struct uart_8250_port *p)
+ 	int i;
+ 	int ret;
+ 
++	/* Released or never requested: the caller falls back to PIO. */
++	if (!dma->txchan)
++		return -EINVAL;
++
+ 	if (dma->tx_running) {
+ 		if (up->x_char) {
+ 			dmaengine_pause(dma->txchan);
+@@ -185,6 +195,9 @@ int serial8250_rx_dma(struct uart_8250_port *p)
+ 	struct uart_8250_dma		*dma = p->dma;
+ 	struct dma_async_tx_descriptor	*desc;
+ 
++	if (!dma->rxchan)
++		return -EINVAL;
++
+ 	if (dma->rx_running)
+ 		return 0;
+ 
+@@ -322,25 +335,39 @@ EXPORT_SYMBOL_GPL(serial8250_request_dma);
+ void serial8250_release_dma(struct uart_8250_port *p)
+ {
+ 	struct uart_8250_dma *dma = p->dma;
++	struct dma_chan *rxchan, *txchan;
++	unsigned long flags;
+ 
+ 	if (!dma)
+ 		return;
+ 
+-	/* Release RX resources */
+-	dmaengine_terminate_sync(dma->rxchan);
+-	dma->rx_running = 0;
+-	dma_free_coherent(dmaengine_get_dma_device(dma->rxchan), dma->rx_size,
+-			  dma->rx_buf, dma->rx_addr);
+-	dma_release_channel(dma->rxchan);
++	/*
++	 * Take the channels away under the port lock first. The start paths
++	 * (serial8250_tx_dma(), serial8250_rx_dma()) and the completion
++	 * callbacks run under that lock, so none of them can hand a new
++	 * descriptor to a channel between its termination and its release,
++	 * or run on it once it is gone.
++	 */
++	uart_port_lock_irqsave(&p->port, &flags);
++	rxchan = dma->rxchan;
++	txchan = dma->txchan;
+ 	dma->rxchan = NULL;
++	dma->txchan = NULL;
++	dma->rx_running = 0;
++	dma->tx_running = 0;
++	uart_port_unlock_irqrestore(&p->port, flags);
++
++	/* Release RX resources */
++	dmaengine_terminate_sync(rxchan);
++	dma_free_coherent(dmaengine_get_dma_device(rxchan), dma->rx_size,
++			  dma->rx_buf, dma->rx_addr);
++	dma_release_channel(rxchan);
+ 
+ 	/* Release TX resources */
+-	dmaengine_terminate_sync(dma->txchan);
+-	dma_unmap_single(dmaengine_get_dma_device(dma->txchan), dma->tx_addr,
++	dmaengine_terminate_sync(txchan);
++	dma_unmap_single(dmaengine_get_dma_device(txchan), dma->tx_addr,
+ 			 UART_XMIT_SIZE, DMA_TO_DEVICE);
+-	dma_release_channel(dma->txchan);
+-	dma->txchan = NULL;
+-	dma->tx_running = 0;
++	dma_release_channel(txchan);
+ 
+ 	dev_dbg_ratelimited(p->port.dev, "dma channels released\n");
+ }
+-- 
+2.56.0
+

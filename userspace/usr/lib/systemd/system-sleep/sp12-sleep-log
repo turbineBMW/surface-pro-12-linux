@@ -1,0 +1,92 @@
+#!/bin/sh
+# sp12-sleep-log: what each sleep cost and what ended it.
+#
+# systemd-sleep runs this before ("pre") and after ("post") every suspend.
+# Before: snapshot the wakeup sources, the battery and the S0ix residency
+# counters, turn on the kernel's PM debug messages (they name the wakeup
+# source and the ACPI GPE/IRQ in the journal), and sync the journal to disk so
+# the record survives a battery that dies during the sleep. After: log one
+# line (journal tag sp12-sleep) with how long the system slept, how much of
+# that the SoC spent in S0ix, the battery used and the average draw, the wake
+# IRQ, and every wakeup source whose counters moved.
+#
+# A number of seconds in /run/sp12/sleep-sentinel arms the RTC to wake the
+# system that long after each sleep begins (sp12-suspend-test sentinel). With
+# the lid closed logind puts it back to sleep after its 30 s holdoff, so an
+# overnight sleep becomes an hourly record of drain and S0ix residency.
+#
+# Written for the dead-battery-after-suspend hunt (docs/peripheral-plan.md,
+# Phase 4): twice the tablet looped wake/suspend with the lid closed, then
+# stopped answering and lost ~3 W until the battery was flat.
+# SPDX-License-Identifier: MIT
+
+[ "$1" = pre ] || [ "$1" = post ] || exit 0
+# State in a root-owned subdirectory: /run/sp12 is sticky and world-writable,
+# and fs.protected_regular refuses root a file another user created there.
+S=/run/sp12/sleep
+SENTINEL=/run/sp12/sleep-sentinel
+mkdir -p "$S"
+BAT=/sys/class/power_supply/BAT1
+LPIT=/sys/devices/system/cpu/cpuidle/low_power_idle_system_residency_us
+SLP=/sys/kernel/debug/pmc_core/slp_s0_residency_usec
+TAG=sp12-sleep
+
+rd() { cat "$1" 2>/dev/null || echo 0; }
+lid() { awk '{print $2}' /proc/acpi/button/lid/*/state 2>/dev/null | head -1; }
+wakeups() {
+	for w in /sys/class/wakeup/wakeup*; do
+		[ -r "$w/name" ] || continue
+		printf '%s %s %s %s\n' "$(cat "$w/name")" "$(rd "$w/event_count")" \
+			"$(rd "$w/wakeup_count")" "$(rd "$w/active_count")"
+	done | sort
+}
+# IRQ counters of the lines that can end a sleep: the GPIO children (EC wake
+# line "ssam_wakeup", buttons, touch, NFC), the ACPI SCI and the RTC.
+irqs() {
+	awk '/intel-gpio|acpi|rtc/ { n = $1; s = 0; for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) s += $i; print n, s, $NF }' /proc/interrupts | sort
+}
+energy() { rd "$BAT/energy_now"; }   # uWh
+pct() { rd "$BAT/capacity"; }
+s0ix() { rd "$LPIT"; }               # us in S0ix (ACPI LPIT)
+slps0() { rd "$SLP"; }               # us in SLP_S0 (PMC), root only
+
+if [ "$1" = pre ]; then
+	echo 1 > /sys/power/pm_debug_messages 2>/dev/null
+	wakeups > "$S/sleep.pre.wakeups"
+	irqs > "$S/sleep.pre.irqs"
+	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
+	sentinel=
+	if [ -s "$SENTINEL" ]; then
+		sentinel=$(tr -dc 0-9 < "$SENTINEL")
+		[ -n "$sentinel" ] && rtcwake -m no -s "$sentinel" >/dev/null 2>&1 && sentinel=", RTC wake in $sentinel s" || sentinel=", sentinel: rtcwake failed"
+	fi
+	logger -t $TAG "pre $2: battery $(pct) % ($(( $(energy) / 1000 )) mWh, $(rd "$BAT/status")), lid $(lid), S0ix counter $(s0ix) us$sentinel"
+	sync
+	exit 0
+fi
+
+# post
+[ -s "$S/sleep.pre" ] || { logger -t $TAG "post $2: no pre record"; exit 0; }
+read -r t0 e0 l0 p0 c0 < "$S/sleep.pre"
+t1=$(date +%s); e1=$(energy); l1=$(s0ix); p1=$(slps0)
+slept=$(( t1 - t0 )); [ "$slept" -gt 0 ] || slept=1
+lpit=$(( (l1 - l0) / 10000 / slept ))     # percent of the sleep in S0ix
+pmc=$(( (p1 - p0) / 10000 / slept ))
+used=$(( e0 - e1 ))                       # uWh, negative while charging
+mw=$(( used * 3600 / slept / 1000 ))      # average mW
+irq=$(cat /sys/power/pm_wakeup_irq 2>/dev/null)
+if [ -n "$irq" ]; then
+	irqname=$(awk -v n="$irq:" '$1 == n {for (i = NF - 2; i <= NF; i++) printf "%s ", $i}' /proc/interrupts | sed 's/ *$//')
+	irq="IRQ $irq ($irqname)"
+else
+	irq="no wake IRQ recorded"
+fi
+wakeups > "$S/sleep.post.wakeups"
+changed=$(join "$S/sleep.pre.wakeups" "$S/sleep.post.wakeups" |
+	awk '$5 > $2 || $6 > $3 { printf "%s%s +%d events +%d wakeups", sep, $1, $5 - $2, $6 - $3; sep = "; " }')
+[ -n "$changed" ] || changed="no wakeup source moved"
+irqs > "$S/sleep.post.irqs"
+fired=$(join "$S/sleep.pre.irqs" "$S/sleep.post.irqs" |
+	awk '$4 > $2 { printf "%sIRQ %s %s +%d", sep, $1, $5, $4 - $2; sep = ", " }')
+[ -n "$fired" ] || fired="no GPIO/ACPI/RTC IRQ fired"
+logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $fired; $changed"
