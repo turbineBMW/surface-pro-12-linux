@@ -2,3 +2,9 @@
 # IR camera) appears, wire the graph and give it a stable name.
 SUBSYSTEM=="video4linux", KERNEL=="video*", ATTR{name}=="Intel IPU7* ISYS Capture 8", \
   SYMLINK+="sp12-ir", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sp12-ir-camera.service"
+
+# Diagnostic (2026-11-08): log every ioctl on the IR capture node with the
+# caller's name, to catch what resets its format to YUYV 3840x2160 (seen
+# twice; face unlock then refuses the node). Level 2 skips the buffer ioctls.
+# Drop once the culprit is known.
+ACTION=="add", SUBSYSTEM=="video4linux", ATTR{name}=="Intel IPU7.5 ISYS Capture 8", ATTR{dev_debug}="2"

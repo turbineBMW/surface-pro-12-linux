@@ -124,6 +124,19 @@ if [ "$h1" -gt "$h0" ]; then
 		logger -t $TAG -p user.warning "post $2: resumed from hibernation and the IPU did not re-authenticate its firmware; the cameras need a reboot"
 	fi
 fi
+# The IR capture node (ISYS Capture 8, /dev/sp12-ir) is wired to GREY 644x604
+# at boot by sp12-ir-camera; something has been seen resetting it to the
+# driver default (YUYV 3840x2160), after which face unlock refuses the node.
+# Re-apply the graph at every resume (nothing can be streaming here) and say
+# so when the format had changed.
+irfix=
+if [ -x /usr/lib/sp12/sp12-ir-graph ] && [ -e /dev/sp12-ir ]; then
+	irfmt=$(v4l2-ctl -d /dev/sp12-ir --get-fmt-video 2>/dev/null | awk '/Pixel Format/ { gsub(/\x27/, "", $4); print $4 }')
+	if [ -n "$irfmt" ] && [ "$irfmt" != GREY ]; then
+		irfix="; IR node was $irfmt, re-wired"
+	fi
+	/usr/lib/sp12/sp12-ir-graph >/dev/null 2>&1 || irfix="; IR graph re-wire failed"
+fi
 [ -s "$S/sleep.pre" ] || { logger -t $TAG "post $2: no pre record"; exit 0; }
 read -r t0 e0 l0 p0 c0 < "$S/sleep.pre"
 t1=$(date +%s); e1=$(energy); l1=$(s0ix); p1=$(slps0)
@@ -147,4 +160,4 @@ irqs > "$S/sleep.post.irqs"
 fired=$(join "$S/sleep.pre.irqs" "$S/sleep.post.irqs" |
 	awk '$4 > $2 { printf "%sIRQ %s %s +%d", sep, $1, $5, $4 - $2; sep = ", " }')
 [ -n "$fired" ] || fired="no GPIO/ACPI/RTC IRQ fired"
-logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $fired; $changed$events"
+logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $fired; $changed$events$irfix"
