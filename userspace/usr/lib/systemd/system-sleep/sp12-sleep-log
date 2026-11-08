@@ -15,6 +15,19 @@
 # the lid closed logind puts it back to sleep after its 30 s holdoff, so an
 # overnight sleep becomes an hourly record of drain and S0ix residency.
 #
+# Two more things it does, both switchable in /etc/sp12/sleep.conf:
+# - EC_WAKE_LID_CLOSED=no (default): with the lid closed, the EC's wake line
+#   (serial0-0 wakeup, the attached keyboard's only way to wake the system)
+#   is turned off for the sleep and restored at resume. The EC also raises it
+#   for events nobody asked for, which with the lid closed woke the tablet
+#   every 33 s for an hour on 2026-11-05 and 2026-11-07; a closed lid means
+#   the keyboard cannot be typed on, and lid-open (ACPI GPE 0x30) and the
+#   power button wake the system regardless.
+# - TRACE_EC_EVENTS=yes (default): the surface_aggregator tracepoint for
+#   received EC events is cleared before the sleep and read after it, so the
+#   post line names the EC events that arrived at resume, including the one
+#   behind an EC wake (drivers consume most of them silently).
+#
 # Written for the dead-battery-after-suspend hunt (docs/peripheral-plan.md,
 # Phase 4): twice the tablet looped wake/suspend with the lid closed, then
 # stopped answering and lost ~3 W until the battery was flat.
@@ -30,6 +43,11 @@ BAT=/sys/class/power_supply/BAT1
 LPIT=/sys/devices/system/cpu/cpuidle/low_power_idle_system_residency_us
 SLP=/sys/kernel/debug/pmc_core/slp_s0_residency_usec
 TAG=sp12-sleep
+EC_WAKE=/sys/bus/serial/devices/serial0-0/power/wakeup
+TRACE=/sys/kernel/tracing
+EC_WAKE_LID_CLOSED=no
+TRACE_EC_EVENTS=yes
+[ -r /etc/sp12/sleep.conf ] && . /etc/sp12/sleep.conf
 
 rd() { cat "$1" 2>/dev/null || echo 0; }
 lid() { awk '{print $2}' /proc/acpi/button/lid/*/state 2>/dev/null | head -1; }
@@ -55,17 +73,40 @@ if [ "$1" = pre ]; then
 	wakeups > "$S/sleep.pre.wakeups"
 	irqs > "$S/sleep.pre.irqs"
 	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
+	ecwake=
+	if [ "$EC_WAKE_LID_CLOSED" = no ] && [ "$(lid)" = closed ] && [ -w "$EC_WAKE" ]; then
+		cat "$EC_WAKE" > "$S/ecwake.saved"
+		echo disabled > "$EC_WAKE" && ecwake=", EC wake off (lid closed)"
+	else
+		rm -f "$S/ecwake.saved"
+	fi
+	if [ "$TRACE_EC_EVENTS" = yes ] && [ -d "$TRACE/events/surface_aggregator/ssam_rx_event_received" ]; then
+		echo 1 > "$TRACE/events/surface_aggregator/ssam_rx_event_received/enable"
+		echo 1 > "$TRACE/tracing_on"
+		echo > "$TRACE/trace"
+	fi
 	sentinel=
-	if [ -s "$SENTINEL" ]; then
+	if [ -s "$SENTINEL" ] && [ "$2" = suspend ]; then
 		sentinel=$(tr -dc 0-9 < "$SENTINEL")
 		[ -n "$sentinel" ] && rtcwake -m no -s "$sentinel" >/dev/null 2>&1 && sentinel=", RTC wake in $sentinel s" || sentinel=", sentinel: rtcwake failed"
 	fi
-	logger -t $TAG "pre $2: battery $(pct) % ($(( $(energy) / 1000 )) mWh, $(rd "$BAT/status")), lid $(lid), S0ix counter $(s0ix) us$sentinel"
+	logger -t $TAG "pre $2: battery $(pct) % ($(( $(energy) / 1000 )) mWh, $(rd "$BAT/status")), lid $(lid), S0ix counter $(s0ix) us$sentinel$ecwake"
 	sync
 	exit 0
 fi
 
 # post
+if [ -s "$S/ecwake.saved" ]; then
+	cat "$S/ecwake.saved" > "$EC_WAKE" 2>/dev/null
+	rm -f "$S/ecwake.saved"
+fi
+events=
+if [ "$TRACE_EC_EVENTS" = yes ] && [ -r "$TRACE/trace" ]; then
+	events=$(grep ssam_rx_event_received "$TRACE/trace" | head -12 |
+		sed -E 's/.*ssam_rx_event_received: *//; s/rqid=[^ ,]*,? *//' | sort | uniq -c |
+		awk '{ n = $1; $1 = ""; printf "%s%dx%s", sep, n, $0; sep = ";" }')
+	[ -n "$events" ] && events="; EC events at resume:$events" || events="; no EC event at resume"
+fi
 [ -s "$S/sleep.pre" ] || { logger -t $TAG "post $2: no pre record"; exit 0; }
 read -r t0 e0 l0 p0 c0 < "$S/sleep.pre"
 t1=$(date +%s); e1=$(energy); l1=$(s0ix); p1=$(slps0)
@@ -89,4 +130,4 @@ irqs > "$S/sleep.post.irqs"
 fired=$(join "$S/sleep.pre.irqs" "$S/sleep.post.irqs" |
 	awk '$4 > $2 { printf "%sIRQ %s %s +%d", sep, $1, $5, $4 - $2; sep = ", " }')
 [ -n "$fired" ] || fired="no GPIO/ACPI/RTC IRQ fired"
-logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $fired; $changed"
+logger -t $TAG "post $2: slept ${slept} s, S0ix ${lpit} % (PMC SLP_S0 ${pmc} %), battery $c0 -> $(pct) % (${used} uWh, ${mw} mW), lid $(lid), $irq; $fired; $changed$events"
