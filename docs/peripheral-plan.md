@@ -614,6 +614,24 @@ loss times out once ("vd55g0 stream start failed -110: fsm=0x1", vd55g1
 returns -EINVAL after `pm_runtime_put`) and the daemon's reopen a few
 seconds later works; a retry in `vd55g0_enable_streams` is the fix to make.
 
+**Bluetooth icon "turned off" after a hibernate (2026-11-08 evening).**
+Bluetooth itself comes back by itself: the restore resets the controller
+(`btintel_pcie`: "BT reprobe failed", reset, firmware reloaded in ~1 s),
+BlueZ removes and re-creates `/org/bluez/hci0`, the keyboard reconnects two
+seconds later. But the bar's Bluetooth widget then shows "turned off" and
+its toggle does nothing: Quickshell 0.3.2's Bluetooth singleton holds the
+new adapter with a stale snapshot (`enabled=false`, state Enabling) and
+never learns it is powered. Reproduced without a hibernate: a probe QML
+logging `Bluetooth.adapters` follows a driver rebind fine when running, but
+SIGSTOPped across the rebind (as the shell is frozen across the restore) it
+ends with the stale object, while BlueZ says Powered yes. The object does
+receive later property changes (discoverable on, power off/on), so only the
+creation-time snapshot is wrong (likely the Powered change arrives before
+the new object's properties are read). Workaround in the hook: after a
+hibernate, once the adapter is powered, bounce it off and on, which emits
+the changes the shell missed; a shell restart also fixes it. Worth an
+upstream Quickshell report with the SIGSTOP reproducer.
+
 Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
 with `HibernateDelaySec=48h` (12 h since the IPU fix below) and `HibernateOnACPower=no`
 (`etc/systemd/sleep.conf.d/30-sp12-hibernate.conf`,
