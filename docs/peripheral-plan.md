@@ -462,8 +462,9 @@ Instrumentation (2026-11-08, `userspace/`):
   thread stuck for 2 min reboots instead of draining the battery, and with
   `--trace` turns on `pm_trace` (device name of a hang on the next boot; the
   RTC clock is wrong until the next clean shutdown). A panic's log needs
-  efi-pstore, which Arch disables (`efi_pstore.pstore_disable=0` on the
-  kernel command line, `/etc/kernel/cmdline`).
+  efi-pstore, which Arch builds disabled: `etc/limine-entry-tool.d/efi-pstore.conf`
+  adds `efi_pstore.pstore_disable=0` to the kernel command line (applied here
+  2026-11-08 with `limine-mkinitcpio`, both kernels; active from the next boot).
 
 Plan, once the battery is above ~50 %, on battery:
 
