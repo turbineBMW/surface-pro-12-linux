@@ -30,7 +30,7 @@ thread (zR-JB's eight-patch series, MosesKim84), and `~/Projects/sp11`.
 | 5 | NFC, **NXP PN560** | `1FC93002` `I2C4.NFC1`, I²C `0x28`; `_CRS` = IRQ, supply, VEN | **Works** (`0006`, stock nxp-nci core): phones, and contactless cards when polling includes a listen phase (initiator + NFC-DEP target, as Windows does). Reader-only polling misses cards (8b). Daemon + Omarchy plugin: 8b2 | stock nxp-nci + `0006`, tools 1.21 |
 | 6 | ~~Unknown~~ Surface Display Hardware Driver (UMDF + `MIS766FpgaFirmware.bin`) | `MSHW0380` `I2C0.FINK`, **no `_CRS`** | unbound | out of scope: the display works without it |
 | 7 | ~~SSAM "dropping unexpected command message (rqid = 0x0000)"~~ | `MSHW0084` | **Fixed:** a symptom of a POS event storm (~13% CPU), see `0008` | tabletsw |
-| 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency). Keyboard wake works attached and over Bluetooth (Phase 4, `0025`/`0026`, bluez-sp12) | |
+| 8 | Suspend | s2idle only | **S0ix reached** on lid close (19.6 s residency). Keyboard wake works attached and over Bluetooth (Phase 4, `0025`/`0026`, bluez-sp12). The dead-battery panic in the EC UART's DMA teardown is fixed (`0033`/`0034`, Phase 4) | |
 | 9 | Speakers | `rt1320` | **Fine, not reproduced** (2026-09-24): loud and clean at 100% and at low steps with bass-heavy tracks. #2144 had reported distortion at high volume and low loudness at low volume | |
 | 10 | Slim Pen tail button | BLE | **Works** (`sp12-pen-pair`, tools 1.28): Meta+F20 / F19 / F18 for click / double click / hold; any click reconnects, docked or not | bluez |
 | 11 | Microsoft power/thermal devices | `MSHW0800` TS01–12, `MSFT000A/F/10/12`, `MSHW0801`, `MSHW0299` | Temperatures **work** via `surface_temp` (hwmon `surface_thermal`: RTS1–6, VTS1–4); the ACPI devices themselves stay unbound | Windows PEP/thermal framework |
@@ -525,10 +525,15 @@ Plan, once the battery is above ~50 %, on battery:
    battery, with its log in `/sys/fs/pstore`. Still open: which EC event
    wakes the closed lid every 33 s; with the panic gone the loop costs
    about 1 Wh an hour, nothing worse.
-3. On the fixed kernel: `sentinel 40`, lid closed, for an hour or more (the
-   race had a 1-in-12 to 1-in-57 chance per cycle, so 100+ clean cycles
-   mean something), then `sentinel 3600` overnight for the hourly drain
-   and S0ix record.
+3. **Fixed kernel, done 2026-11-08** (linux-sp12test -4, `sentinel 40`, lid
+   closed, 12:28-14:29): 105 cycles, 105 suspends succeeded, 0 failed, no
+   panic (the old kernel died on cycles 11, 57 and 12). 104 wakes were the
+   RTC (IRQ 9), the last the lid opening, which arrives through the EC's
+   wake line (`ssam_wakeup`); S0ix 95-96 % of every 41 s sleep. The loop
+   itself cost 80 -> 71 % in two hours, about 2 Wh/h for 30 s awake per
+   cycle: that is what a closed-lid EC wake loop costs now that it no
+   longer kills the machine, and why the EC event behind it is still worth
+   finding. Next: `sentinel 3600`, lid closed, overnight.
 
 Safety net to decide on, independent of the cause: `suspend-then-hibernate`
 (logind reports both hibernate and suspend-then-hibernate possible; the
