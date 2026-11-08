@@ -484,7 +484,15 @@ Plan, once the battery is above ~50 %, on battery:
    work until the daemon or the lock refuses new authentications while a
    sleep is pending. (b) `--trace` cannot be combined with RTC wakes:
    `pm_trace` stores its hash in the RTC time registers, so the armed alarm
-   never matches.
+   never matches. (c) Lid open, suspended by typing `systemctl suspend`, the
+   tablet woke after 1-2 s through the EC's wake line (`ssam_wakeup`, GPIO
+   IRQ 144 under IRQ 14, no wakeup source credited: `ssam_irq_handle()`
+   registers none): the key release and touchpad contact that follow the
+   Enter reach the EC, which holds them and wakes the host. The same command
+   behind `sleep 10` with hands off slept the full 40 s to the RTC, 97 % S0ix.
+   The hook now also diffs the GPIO/ACPI/RTC lines of `/proc/interrupts`, so
+   an EC wake is named directly. The NFC reader's IRQ (`nxp-nci_i2c`) fired
+   7 times in those 40 s without waking the system.
 2. `sentinel 40`, lid closed, attended for about an hour (the 2026-11-05 loop
    hung on the 11th cycle, 2026-11-07 on the 57th): the RTC stands in for
    the EC as the waker, logind supplies the 29 s re-suspend. If it wedges,
