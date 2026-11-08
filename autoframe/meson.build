@@ -4,14 +4,15 @@ project('sp12-autoframe', 'cpp',
 
 gst_dep = dependency('gstreamer-1.0')
 gstvideo_dep = dependency('gstreamer-video-1.0')
+gstbase_dep = dependency('gstreamer-base-1.0')
 openvino_dep = dependency('openvino')
 opencv_dep = dependency('opencv5')
 
 plugin_dir = get_option('libdir') / 'gstreamer-1.0'
 
 shared_library('gstsp12autoframe',
-  ['src/gstsp12autoframe.cpp', 'src/gstsp12bt601.cpp', 'src/yunet.cpp'],
-  dependencies: [gst_dep, gstvideo_dep, openvino_dep, opencv_dep],
+  ['src/gstsp12autoframe.cpp', 'src/gstsp12bt601.cpp', 'src/gstsp12isplock.cpp', 'src/yunet.cpp'],
+  dependencies: [gst_dep, gstbase_dep, gstvideo_dep, openvino_dep, opencv_dep],
   install: true,
   install_dir: plugin_dir,
   name_prefix: '')

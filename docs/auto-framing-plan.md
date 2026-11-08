@@ -402,3 +402,19 @@ sp12-autoframe 0.5 and sp12-camera-hal pkgrel 6, except item 5.
 At idle the relays cost nothing measurable (no context switches in 15
 minutes, before or after serving a client), so on-demand starting is not
 needed for power.
+7. **Both cameras streaming through the ISP at once wedge its firmware:
+   fixed** (sp12-autoframe 0.9). With the rear relay streaming, front
+   start/stop sessions failed after 7 (PSYS "group 3, code 1" errors, then
+   "wait running fw tasks clear timeout"; or ISYS STREAM_CAPTURE_ACK errors,
+   "fw not ready for shutdown, state 0xdead0001" and the ISYS runtime PM in
+   error, which only a reboot clears). Front alone: 10/10 clean. New element
+   **`sp12isplock`** (same plugin), placed right after `icamerasrc` in both
+   relay pipelines: a bin changes state from the sinks towards the sources,
+   so the element goes NULL → READY before `icamerasrc` opens the camera and
+   READY → NULL after it has closed it. It takes an exclusive `flock` on
+   `/run/sp12/isp.lock` in the first and drops it in the second, so the
+   second camera waits until the first is fully closed (a camera switch in
+   an app waits ~0.2 s for the old one; two apps on both cameras get one
+   picture, not a wedged ISP). Data passes through untouched.
+   `autoframe/tools/relay-stop-test.sh` runs the start/stop sessions, with
+   an optional background stream on the other camera.
