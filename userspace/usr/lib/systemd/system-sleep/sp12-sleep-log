@@ -123,6 +123,25 @@ if [ "$h1" -gt "$h0" ]; then
 		touch /run/sp12/cameras-need-reboot
 		logger -t $TAG -p user.warning "post $2: resumed from hibernation and the IPU did not re-authenticate its firmware; the cameras need a reboot"
 	fi
+	# The restore resets the Bluetooth controller (btintel_pcie reloads its
+	# firmware) and BlueZ removes and re-creates hci0 while the shell is still
+	# thawing. Quickshell's Bluetooth singleton then holds the new adapter
+	# with a stale "powered off, enabling" snapshot and the bar shows
+	# Bluetooth turned off with a toggle that does nothing (reproduced by
+	# rebinding the driver under a SIGSTOPped client). A power bounce once the
+	# adapter is back emits the property changes it missed. A plain suspend
+	# does not re-create the adapter.
+	for i in $(seq 1 20); do
+		bluetoothctl show 2>/dev/null | grep -q "Powered: yes" && break
+		sleep 0.5
+	done
+	if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+		sleep 1
+		bluetoothctl power off >/dev/null 2>&1
+		sleep 1
+		bluetoothctl power on >/dev/null 2>&1
+		logger -t $TAG "post $2: Bluetooth power bounced so the shell's adapter view catches up"
+	fi
 fi
 # The IR capture node (ISYS Capture 8, /dev/sp12-ir) is wired to GREY 644x604
 # at boot by sp12-ir-camera; something has been seen resetting it to the
