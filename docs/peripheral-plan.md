@@ -533,7 +533,11 @@ Plan, once the battery is above ~50 %, on battery:
    itself cost 80 -> 71 % in two hours, about 2 Wh/h for 30 s awake per
    cycle: that is what a closed-lid EC wake loop costs now that it no
    longer kills the machine, and why the EC event behind it is still worth
-   finding. Next: `sentinel 3600`, lid closed, overnight.
+   finding. Next: `sentinel 3600`, lid closed, overnight. (Superseded by the
+   suspend-then-hibernate decision below; the overnight record came from the
+   2026-11-09 night instead: 11 h 09 m closed, 11 hourly
+   suspend-then-hibernate cycles at 99 % S0ix, 74 -> 69 %, ~225 mW, no wake
+   loop, no panic.)
 
 **EC wake rule and hibernate (2026-11-08, afternoon).** With the lid closed
 the hook now turns the EC's wake line (`serial0-0` wakeup) off for the sleep
@@ -612,7 +616,8 @@ with the caller's name (`journalctl -k | grep "video8.*S_FMT"` names the
 culprit next time). Separately, the first IR stream start after a power
 loss times out once ("vd55g0 stream start failed -110: fsm=0x1", vd55g1
 returns -EINVAL after `pm_runtime_put`) and the daemon's reopen a few
-seconds later works; a retry in `vd55g0_enable_streams` is the fix to make.
+seconds later works. Fixed by `0036`, below: not a retry, a stale runtime
+PM state.
 
 **Bluetooth icon "turned off" after a hibernate (2026-11-08 evening).**
 Bluetooth itself comes back by itself: the restore resets the controller
@@ -631,6 +636,33 @@ the new object's properties are read). Workaround in the hook: after a
 hibernate, once the adapter is powered, bounce it off and on, which emits
 the changes the shell missed; a shell restart also fixes it. Worth an
 upstream Quickshell report with the SIGSTOP reproducer.
+
+**IR first start after a restore (2026-11-09, fixed: `0036`, sp12-modules
+1.21).** The cause was not a slow sensor. `acpi_subsys_freeze()` (the ACPI
+PM domain of every I2C sensor) runtime-resumes each device before the
+snapshot, and vd55g1 had runtime PM callbacks only, so the image was taken
+with the sensor powered on and booted ("detected vd55g0" in the freeze
+log) and recorded it as runtime active. After the restore the sensor had
+lost power and sat in READY_TO_BOOT (`fsm=0x1`), but runtime PM still saw
+it on, so the first stream start skipped the power-on and boot. The failed
+start dropped the last reference, autosuspend powered the sensor off, and
+the next open booted it: hence "works at the second try". `0036` uses
+`DEFINE_RUNTIME_DEV_PM_OPS` (`pm_runtime_force_suspend/resume` as the sleep
+callbacks), as most sensor drivers do: the sensor is off and marked
+suspended at freeze, and the first open after a restore boots it. Verified
+2026-11-09: after a hibernate the IR streamed at the first open ("vd55g0
+streaming", no failure) and face unlock worked. Packaging the series also
+showed that kernel-only patches (`0033`/`0034`, serial core) broke the 7.4
+DKMS build of any package carrying them (their files are not in the DKMS
+checkout); `prepare-sources.sh` now skips patches with none of their files
+present.
+
+That restore also showed the firmware can still be authenticated when the
+image kernel takes over: no "firmware no longer authenticated" line,
+cameras fine, yet the hook warned "cameras need a reboot" because it
+expected a re-authentication. The hook now warns only on a logged failure
+("FW authentication failed" from `0035`, or the ISYS "fw boot timeout") and
+otherwise says whether the firmware was re-authenticated or still valid.
 
 Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
 with `HibernateDelaySec=48h` (12 h since the IPU fix below) and `HibernateOnACPower=no`
