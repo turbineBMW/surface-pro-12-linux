@@ -27,6 +27,16 @@
 #   received EC events is cleared before the sleep and read after it, so the
 #   post line names the EC events that arrived at resume, including the one
 #   behind an EC wake (drivers consume most of them silently).
+# - HIBERNATE_UNLOCK=yes (default): after a restore from hibernation, write
+#   /run/sp12-hibernate-restored for the lock screen, which then unlocks the
+#   session once. The image is on the LUKS root, so a restore means the LUKS
+#   passphrase was just typed; a second prompt from the lock screen adds
+#   nothing. Only a restore the kernel logged ("Hibernation image restored
+#   successfully", a pm_debug message, hence pm_debug_messages on) writes it;
+#   a plain suspend, or a suspend-then-hibernate that never hibernated, does
+#   not. The file is in /run itself, writable by root alone (unlike the
+#   sticky, world-writable /run/sp12), and holds the boot id and the restore
+#   count, so the lock screen can use each one once.
 #
 # Written for the dead-battery-after-suspend hunt (docs/peripheral-plan.md,
 # Phase 4): twice the tablet looped wake/suspend with the lid closed, then
@@ -50,6 +60,9 @@ EC_WAKE=/sys/bus/serial/devices/serial0-0/power/wakeup
 TRACE=/sys/kernel/tracing
 EC_WAKE_LID_CLOSED=no
 TRACE_EC_EVENTS=yes
+HIBERNATE_UNLOCK=yes
+UNLOCK_MARKER=/run/sp12-hibernate-restored
+RESTORED="Hibernation image restored successfully"
 [ -r /etc/sp12/sleep.conf ] && . /etc/sp12/sleep.conf
 
 rd() { cat "$1" 2>/dev/null || echo 0; }
@@ -77,6 +90,8 @@ if [ "$1" = pre ]; then
 	irqs > "$S/sleep.pre.irqs"
 	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
 	dmesg 2>/dev/null | grep -c "hibernation: hibernation exit" > "$S/hibernations.pre"
+	dmesg 2>/dev/null | grep -c "$RESTORED" > "$S/restores.pre"
+	rm -f "$UNLOCK_MARKER"
 	dmesg 2>/dev/null | grep -c "CSE authenticate_run done" > "$S/ipuauth.pre"
 	dmesg 2>/dev/null | grep -cE "$IPU_FAIL" > "$S/ipufail.pre"
 	ecwake=
@@ -102,6 +117,14 @@ if [ "$1" = pre ]; then
 fi
 
 # post
+# First, so the lock screen finds it as soon as it thaws.
+r0=$(cat "$S/restores.pre" 2>/dev/null || echo 0)
+r1=$(dmesg 2>/dev/null | grep -c "$RESTORED")
+if [ "$r1" -gt "$r0" ] && [ "$HIBERNATE_UNLOCK" = yes ]; then
+	printf '%s %s\n' "$(cat /proc/sys/kernel/random/boot_id)" "$r1" > "$UNLOCK_MARKER.new" &&
+		mv -f "$UNLOCK_MARKER.new" "$UNLOCK_MARKER" &&
+		logger -t $TAG "post $2: restored from hibernation (LUKS passphrase entered); lock screen may unlock once"
+fi
 if [ -s "$S/ecwake.saved" ]; then
 	cat "$S/ecwake.saved" > "$EC_WAKE" 2>/dev/null
 	rm -f "$S/ecwake.saved"
