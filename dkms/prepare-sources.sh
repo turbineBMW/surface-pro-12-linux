@@ -95,7 +95,21 @@ if [ -n "$make_cache" ]; then
 	exit 0
 fi
 
+# The series also carries kernel-only patches (e.g. 0033/0034, serial core)
+# for the linux-sp12test build; none of their files are in this checkout, so
+# skip them. A patch with only some files missing still fails.
 for p in "$here/$patches"/*.patch; do
+	present=
+	for f in $(sed -n 's|^+++ b/||p' "$p"); do
+		if [ -e "src/$f" ]; then
+			present=1
+			break
+		fi
+	done
+	if [ -z "$present" ]; then
+		echo "prepare-sources: skipping $(basename "$p") (kernel-only)"
+		continue
+	fi
 	echo "prepare-sources: applying $(basename "$p")"
 	patch -d src -p1 --forward --batch -s < "$p"
 done
