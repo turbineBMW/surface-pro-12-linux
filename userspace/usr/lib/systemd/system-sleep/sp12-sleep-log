@@ -43,6 +43,9 @@ BAT=/sys/class/power_supply/BAT1
 LPIT=/sys/devices/system/cpu/cpuidle/low_power_idle_system_residency_us
 SLP=/sys/kernel/debug/pmc_core/slp_s0_residency_usec
 TAG=sp12-sleep
+# IPU firmware failures after a restore: 0035 failing to authenticate, or
+# the ISYS firmware not booting (what a restore without 0035 gives).
+IPU_FAIL="FW authentication failed|fw boot timeout"
 EC_WAKE=/sys/bus/serial/devices/serial0-0/power/wakeup
 TRACE=/sys/kernel/tracing
 EC_WAKE_LID_CLOSED=no
@@ -75,6 +78,7 @@ if [ "$1" = pre ]; then
 	printf '%s %s %s %s %s\n' "$(date +%s)" "$(energy)" "$(s0ix)" "$(slps0)" "$(pct)" > "$S/sleep.pre"
 	dmesg 2>/dev/null | grep -c "hibernation: hibernation exit" > "$S/hibernations.pre"
 	dmesg 2>/dev/null | grep -c "CSE authenticate_run done" > "$S/ipuauth.pre"
+	dmesg 2>/dev/null | grep -cE "$IPU_FAIL" > "$S/ipufail.pre"
 	ecwake=
 	if [ "$EC_WAKE_LID_CLOSED" = no ] && [ "$(lid)" = closed ] && [ -w "$EC_WAKE" ]; then
 		cat "$EC_WAKE" > "$S/ecwake.saved"
@@ -110,18 +114,25 @@ if [ "$TRACE_EC_EVENTS" = yes ] && [ -r "$TRACE/trace" ]; then
 	[ -n "$events" ] && events="; EC events at resume:$events" || events="; no EC event at resume"
 fi
 # After a hibernate that actually happened (suspend-then-hibernate may not
-# have) the IPU must authenticate its firmware again (kernel patch 0035);
-# without that the cameras are dead until a reboot. Report which it was.
+# have) the IPU may need to authenticate its firmware again (kernel patch
+# 0035); if that fails the cameras are dead until a reboot. Often there is
+# nothing to do: the firmware can still be authenticated when the image
+# kernel takes over (seen 2026-11-09, cameras fine), and 0035 then logs
+# nothing. So only a logged failure means the cameras are gone.
 h0=$(cat "$S/hibernations.pre" 2>/dev/null || echo 0)
 h1=$(dmesg 2>/dev/null | grep -c "hibernation: hibernation exit")
 if [ "$h1" -gt "$h0" ]; then
 	a0=$(cat "$S/ipuauth.pre" 2>/dev/null || echo 0)
 	a1=$(dmesg 2>/dev/null | grep -c "CSE authenticate_run done")
-	if [ "$a1" -gt "$a0" ]; then
+	f0=$(cat "$S/ipufail.pre" 2>/dev/null || echo 0)
+	f1=$(dmesg 2>/dev/null | grep -cE "$IPU_FAIL")
+	if [ "$f1" -gt "$f0" ]; then
+		touch /run/sp12/cameras-need-reboot
+		logger -t $TAG -p user.warning "post $2: resumed from hibernation and the IPU firmware failed to authenticate or boot; the cameras need a reboot"
+	elif [ "$a1" -gt "$a0" ]; then
 		logger -t $TAG "post $2: resumed from hibernation, IPU firmware re-authenticated"
 	else
-		touch /run/sp12/cameras-need-reboot
-		logger -t $TAG -p user.warning "post $2: resumed from hibernation and the IPU did not re-authenticate its firmware; the cameras need a reboot"
+		logger -t $TAG "post $2: resumed from hibernation, IPU firmware still authenticated (nothing to do)"
 	fi
 	# The restore resets the Bluetooth controller (btintel_pcie reloads its
 	# firmware) and BlueZ removes and re-creates hci0 while the shell is still
