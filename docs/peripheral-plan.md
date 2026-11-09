@@ -664,6 +664,27 @@ expected a re-authentication. The hook now warns only on a logged failure
 ("FW authentication failed" from `0035`, or the ISYS "fw boot timeout") and
 otherwise says whether the firmware was re-authenticated or still valid.
 
+**No lock-screen prompt after a hibernate (2026-11-09).** A restore needs
+the LUKS passphrase (the image is in `/swap/swapfile` on the LUKS root,
+unlocked by the `encrypt` hook with a passphrase only: no keyfile, no TPM),
+so the lock screen's prompt after it proved nothing new. The hook now
+writes `/run/sp12-hibernate-restored` (boot id and restore count) as its
+first post step when the kernel logged "Hibernation image restored
+successfully" (a pm_debug message; the hook turns those on), and removes
+it before every sleep. The marker is in `/run` itself, which only root can
+write; `/run/sp12` is sticky and world-writable, so a user could plant a
+file there. The lock screen (the user's `turbinebmw.lock` Omarchy plugin,
+not in this repo) watches for a wall-clock jump, then for 20 s looks for a
+root-owned regular file under two minutes old whose token it has not used,
+and unlocks once with the event "hibernate-restore: LUKS passphrase
+entered, unlocking". There is deliberately no IPC unlock: any user process
+could call it. Verified with the IR camera covered: a plain suspend stays
+locked (no marker), and a hibernate unlocked one second after the restore.
+The hourly suspend-then-hibernate wakes write nothing. `HIBERNATE_UNLOCK=no`
+in `/etc/sp12/sleep.conf` turns it off. Caveat: if the disk ever gets an
+automatic unlock (TPM, keyfile), turn this off, or a restore would need no
+secret at all.
+
 Decision: `suspend-then-hibernate` for the lid (logind) and the idle plugin,
 with `HibernateDelaySec=48h` (12 h since the IPU fix below) and `HibernateOnACPower=no`
 (`etc/systemd/sleep.conf.d/30-sp12-hibernate.conf`,
